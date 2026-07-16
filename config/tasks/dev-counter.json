@@ -1,0 +1,37 @@
+{
+  "profile": {
+    "task_id": "counter-001",
+    "workload_type": "counter",
+    "current_node_id": "boston",
+
+    "power_kw": 0.1,
+    "checkpoint_bytes": 1024,
+    "data_bytes": 0,
+
+    "prestaged_node_ids": [
+      "boston",
+      "virginia"
+    ],
+
+    "estimated_remaining_seconds": 86400,
+    "accumulated_cost_usd": 0,
+    "cost_cap_usd": null,
+    "last_migration_at": null
+  },
+
+  "runtime": {
+    "module": "magellan.workloads.counter",
+
+    "arguments": [
+      "--checkpoint-file",
+      "{checkpoint_file}",
+      "--interval-seconds",
+      "1"
+    ],
+
+    "environment": {},
+    "working_directory": ".",
+    "checkpoint_relative_path": "checkpoint/counter.json",
+    "stop_timeout_seconds": 10
+  }
+}

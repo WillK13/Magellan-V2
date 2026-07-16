@@ -19,8 +19,21 @@ from magellan.config.models import (
 from magellan.config.policy_models import ScoringPolicy
 from magellan.daemon.scheduler_service import SchedulerService
 from magellan.graph.topology import ClusterGraph
+from magellan.migration.client import (
+    MigrationClient,
+    OwnershipBroadcaster,
+)
+from magellan.migration.service import MigrationService
+from magellan.migration.transfer import (
+    RsyncCheckpointTransfer,
+)
 from magellan.runtime.clock import MagellanClock
-from magellan.state.task_registry import TaskRegistry
+from magellan.runtime.local_process import (
+    LocalProcessRuntime,
+)
+from magellan.state.persistent_registry import (
+    PersistentTaskRegistry,
+)
 
 
 @dataclass
@@ -28,31 +41,37 @@ class DaemonContext:
     cluster: ClusterConfig
     policy: ScoringPolicy
     local_node: NodeConfig
+
     graph: ClusterGraph
     carbon_store: CarbonStore
     clock: MagellanClock
-    registry: TaskRegistry
+
+    registry: PersistentTaskRegistry
+    runtime: LocalProcessRuntime
+
     bid_store: BidStore
     bid_arbiter: BidArbiter
     bid_client: BidClient
+
+    migration_service: MigrationService
     scheduler_service: SchedulerService
 
 
-def _task_file_paths() -> list[Path]:
+def _task_files() -> list[Path]:
     raw = os.getenv(
         "MAGELLAN_TASK_FILES",
-        "config/tasks/dev-llm.json",
+        "config/tasks/dev-counter.json",
     )
 
     paths = [
-        Path(value.strip())
-        for value in raw.split(",")
-        if value.strip()
+        Path(item.strip())
+        for item in raw.split(",")
+        if item.strip()
     ]
 
     if not paths:
         raise RuntimeError(
-            "MAGELLAN_TASK_FILES did not contain any paths"
+            "MAGELLAN_TASK_FILES contained no paths"
         )
 
     return paths
@@ -71,6 +90,28 @@ def build_daemon_context() -> DaemonContext:
         "MAGELLAN_DATASETS",
         "datasets",
     )
+    state_root = Path(
+        os.getenv(
+            "MAGELLAN_STATE_ROOT",
+            "runtime-state",
+        )
+    ).resolve()
+    repository_root = Path(
+        os.getenv(
+            "MAGELLAN_REPOSITORY_ROOT",
+            ".",
+        )
+    ).resolve()
+    remote_state_root = Path(
+        os.getenv(
+            "MAGELLAN_REMOTE_STATE_ROOT",
+            str(state_root),
+        )
+    )
+    ssh_user = os.getenv(
+        "MAGELLAN_SSH_USER",
+        os.getenv("USER", "WILL"),
+    )
     node_id = os.getenv(
         "MAGELLAN_NODE_ID",
         "",
@@ -83,34 +124,30 @@ def build_daemon_context() -> DaemonContext:
 
     cluster = load_cluster_config(cluster_path)
     policy = load_policy_config(policy_path)
+    local_node = cluster.get_node(node_id)
 
-    try:
-        local_node = cluster.get_node(node_id)
-    except KeyError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    registry = TaskRegistry.from_files(
-        _task_file_paths()
+    registry = PersistentTaskRegistry.from_files(
+        paths=_task_files(),
+        state_root=state_root,
+        local_node_id=local_node.id,
     )
 
-    valid_node_ids = {
-        node.id
-        for node in cluster.nodes
-    }
-
-    for task in registry.all_tasks():
-        if task.current_node_id not in valid_node_ids:
-            raise RuntimeError(
-                f"Task {task.task_id} references unknown owner "
-                f"{task.current_node_id}"
-            )
-
     graph = ClusterGraph(cluster)
+
     carbon_store = CarbonStore(
         cluster=cluster,
         datasets_directory=datasets_path,
     )
+
     clock = MagellanClock(policy.clock)
+
+    runtime = LocalProcessRuntime(
+        registry=registry,
+        local_node_id=local_node.id,
+        repository_root=repository_root,
+    )
+
+    runtime.reconcile()
 
     bid_store = BidStore()
     bid_client = BidClient(cluster)
@@ -123,6 +160,26 @@ def build_daemon_context() -> DaemonContext:
         bid_window_seconds=cluster.bid_window_seconds,
     )
 
+    transfer = RsyncCheckpointTransfer(
+        cluster=cluster,
+        registry=registry,
+        ssh_user=ssh_user,
+        remote_state_root=remote_state_root,
+    )
+
+    migration_service = MigrationService(
+        local_node=local_node,
+        cluster=cluster,
+        registry=registry,
+        runtime=runtime,
+        transfer=transfer,
+        client=MigrationClient(cluster),
+        broadcaster=OwnershipBroadcaster(
+            cluster=cluster,
+            local_node_id=local_node.id,
+        ),
+    )
+
     scheduler_service = SchedulerService(
         local_node=local_node,
         cluster=cluster,
@@ -131,7 +188,9 @@ def build_daemon_context() -> DaemonContext:
         carbon_store=carbon_store,
         clock=clock,
         registry=registry,
+        runtime=runtime,
         bid_client=bid_client,
+        migration_service=migration_service,
     )
 
     return DaemonContext(
@@ -142,8 +201,10 @@ def build_daemon_context() -> DaemonContext:
         carbon_store=carbon_store,
         clock=clock,
         registry=registry,
+        runtime=runtime,
         bid_store=bid_store,
         bid_arbiter=bid_arbiter,
         bid_client=bid_client,
+        migration_service=migration_service,
         scheduler_service=scheduler_service,
     )

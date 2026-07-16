@@ -6,7 +6,10 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from magellan.bidding.client import BidClient
-from magellan.bidding.models import BidRequest
+from magellan.bidding.models import (
+    BidRequest,
+    BidStatus,
+)
 from magellan.carbon.store import CarbonStore
 from magellan.config.models import (
     ClusterConfig,
@@ -14,10 +17,16 @@ from magellan.config.models import (
 )
 from magellan.config.policy_models import ScoringPolicy
 from magellan.graph.topology import ClusterGraph
-from magellan.models.types import ActionType, TaskProfile
+from magellan.migration.service import MigrationService
+from magellan.models.types import ActionType
 from magellan.runtime.clock import MagellanClock
+from magellan.runtime.local_process import (
+    LocalProcessRuntime,
+)
 from magellan.scheduler.scoring import evaluate_task
-from magellan.state.task_registry import TaskRegistry
+from magellan.state.persistent_registry import (
+    PersistentTaskRegistry,
+)
 
 
 class SchedulerService:
@@ -29,8 +38,10 @@ class SchedulerService:
         graph: ClusterGraph,
         carbon_store: CarbonStore,
         clock: MagellanClock,
-        registry: TaskRegistry,
+        registry: PersistentTaskRegistry,
+        runtime: LocalProcessRuntime,
         bid_client: BidClient,
+        migration_service: MigrationService,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -39,24 +50,29 @@ class SchedulerService:
         self._carbon_store = carbon_store
         self._clock = clock
         self._registry = registry
+        self._runtime = runtime
         self._bid_client = bid_client
+        self._migration_service = migration_service
 
-    @staticmethod
-    def _destination_label(
-        task: TaskProfile,
-        destination_node_id: str | None,
-    ) -> str:
-        return destination_node_id or task.current_node_id
-
-    def _log_decision(
+    async def _evaluate_task(
         self,
-        task: TaskProfile,
-        decision,
+        task_id: str,
         trace_time,
     ) -> None:
+        task = self._registry.scoring_profile(task_id)
+
+        decision = evaluate_task(
+            task=task,
+            cluster=self._cluster,
+            policy=self._policy,
+            graph=self._graph,
+            carbon_store=self._carbon_store,
+            at_utc=trace_time,
+        )
+
         print(
             f"[epoch] node={self._local_node.id} "
-            f"task={task.task_id} "
+            f"task={task_id} "
             f"trace_time={trace_time.isoformat()}",
             flush=True,
         )
@@ -65,9 +81,9 @@ class SchedulerService:
             decision.ranked_actions,
             start=1,
         ):
-            destination = self._destination_label(
-                task,
-                action.destination_node_id,
+            destination = (
+                action.destination_node_id
+                or task.current_node_id
             )
 
             print(
@@ -81,78 +97,44 @@ class SchedulerService:
                 flush=True,
             )
 
-        selected_destination = self._destination_label(
-            task,
-            decision.selected.destination_node_id,
+        selected = decision.selected
+        destination = (
+            selected.destination_node_id
+            or task.current_node_id
         )
 
         print(
-            f"[selected] action="
-            f"{decision.selected.action.value} "
-            f"destination={selected_destination} "
+            f"[selected] action={selected.action.value} "
+            f"destination={destination} "
             f"reason={decision.reason}",
             flush=True,
         )
 
-    async def _evaluate_owned_task(
-        self,
-        task: TaskProfile,
-        trace_time,
-    ) -> None:
-        decision = evaluate_task(
-            task=task,
-            cluster=self._cluster,
-            policy=self._policy,
-            graph=self._graph,
-            carbon_store=self._carbon_store,
-            at_utc=trace_time,
-        )
-
-        self._log_decision(
-            task=task,
-            decision=decision,
-            trace_time=trace_time,
-        )
-
-        if decision.selected.action != ActionType.MIGRATE:
-            print(
-                f"[dry-run] task={task.task_id} "
-                f"continues with local action "
-                f"{decision.selected.action.value}",
-                flush=True,
-            )
+        if selected.action != ActionType.MIGRATE:
             return
 
-        destination_node_id = (
-            decision.selected.destination_node_id
-        )
-
-        if destination_node_id is None:
+        if selected.destination_node_id is None:
             raise RuntimeError(
                 "Selected migration has no destination"
             )
 
-        epoch_id = (
-            f"{task.task_id}:"
-            f"{int(trace_time.timestamp())}"
-        )
-
         bid = BidRequest(
             bid_id=str(uuid4()),
-            epoch_id=epoch_id,
-            task_id=task.task_id,
+            epoch_id=(
+                f"{task_id}:"
+                f"{int(trace_time.timestamp())}"
+            ),
+            task_id=task_id,
             source_node_id=self._local_node.id,
-            destination_node_id=destination_node_id,
-            candidate=decision.selected,
+            destination_node_id=selected.destination_node_id,
+            candidate=selected,
             submitted_at_utc=datetime.now(timezone.utc),
         )
 
         print(
             f"[bid-send] bid={bid.bid_id} "
-            f"task={bid.task_id} "
-            f"source={bid.source_node_id} "
-            f"destination={bid.destination_node_id} "
-            f"score={bid.candidate.score:.6f}",
+            f"task={task_id} "
+            f"destination={bid.destination_node_id}",
             flush=True,
         )
 
@@ -160,46 +142,49 @@ class SchedulerService:
 
         print(
             f"[bid-result] bid={result.bid_id} "
-            f"task={result.task_id} "
-            f"status={result.status.value} "
-            f"reason={result.decision_reason}",
+            f"task={task_id} "
+            f"status={result.status.value}",
             flush=True,
         )
 
-        if result.status.value == "accepted":
-            print(
-                f"[dry-run] migration accepted for "
-                f"task={task.task_id}, but no process or "
-                f"ownership will move in this milestone",
-                flush=True,
+        if result.status == BidStatus.ACCEPTED:
+            await self._migration_service.migrate(
+                task_id=task_id,
+                destination_node_id=(
+                    selected.destination_node_id
+                ),
             )
 
     async def run_epoch(self) -> None:
-        owned_tasks = self._registry.owned_tasks(
+        await asyncio.to_thread(
+            self._runtime.reconcile
+        )
+
+        task_ids = self._registry.running_owned_task_ids(
             self._local_node.id
         )
 
-        if not owned_tasks:
+        if not task_ids:
             print(
                 f"[scheduler] node={self._local_node.id} "
-                f"is idle; listening for bids",
+                f"has no running owned tasks",
                 flush=True,
             )
             return
 
         trace_time = self._clock.now()
 
-        for task in owned_tasks:
+        for task_id in task_ids:
             try:
-                await self._evaluate_owned_task(
-                    task=task,
-                    trace_time=trace_time,
+                await self._evaluate_task(
+                    task_id,
+                    trace_time,
                 )
             except Exception as exc:
                 print(
                     f"[scheduler-error] node="
                     f"{self._local_node.id} "
-                    f"task={task.task_id} "
+                    f"task={task_id} "
                     f"error={type(exc).__name__}: {exc}",
                     flush=True,
                 )
@@ -209,13 +194,13 @@ class SchedulerService:
         stop_event: asyncio.Event,
     ) -> None:
         while not stop_event.is_set():
-            epoch_started = time.monotonic()
+            started = time.monotonic()
 
             await self.run_epoch()
 
-            elapsed = time.monotonic() - epoch_started
+            elapsed = time.monotonic() - started
 
-            sleep_seconds = max(
+            delay = max(
                 0.0,
                 self._cluster.epoch_seconds - elapsed,
             )
@@ -223,7 +208,7 @@ class SchedulerService:
             try:
                 await asyncio.wait_for(
                     stop_event.wait(),
-                    timeout=sleep_seconds,
+                    timeout=delay,
                 )
             except asyncio.TimeoutError:
                 pass

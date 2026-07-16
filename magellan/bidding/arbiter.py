@@ -5,8 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 from magellan.bidding.models import BidStatus
 from magellan.bidding.store import BidStore
-from magellan.state.task_registry import TaskRegistry
+from typing import Protocol
 
+class CapacityRegistry(Protocol):
+    def count_owned(self, node_id: str) -> int:
+        ...
 
 class BidArbiter:
     """
@@ -17,7 +20,7 @@ class BidArbiter:
     def __init__(
         self,
         store: BidStore,
-        registry: TaskRegistry,
+        registry: CapacityRegistry,
         local_node_id: str,
         capacity: int,
         bid_window_seconds: float,

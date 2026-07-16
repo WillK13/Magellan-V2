@@ -14,6 +14,11 @@ from magellan.bidding.models import (
 )
 from magellan.daemon.context import build_daemon_context
 
+from magellan.migration.models import (
+    MigrationActivationRequest,
+    MigrationActivationResponse,
+    OwnershipUpdate,
+)
 
 context = build_daemon_context()
 
@@ -127,18 +132,8 @@ async def peers() -> dict:
 async def tasks() -> dict:
     return {
         "local_node_id": context.local_node.id,
-        "owned_tasks": [
-            task.model_dump(mode="json")
-            for task in context.registry.owned_tasks(
-                context.local_node.id
-            )
-        ],
-        "known_tasks": [
-            task.model_dump(mode="json")
-            for task in context.registry.all_tasks()
-        ],
+        "tasks": context.registry.summaries(),
     }
-
 
 @app.post("/bids", response_model=BidRecord)
 async def submit_bid(
@@ -201,3 +196,70 @@ async def get_bid(bid_id: str) -> BidRecord:
         )
 
     return record
+
+@app.post("/tasks/{task_id}/start")
+async def start_task(task_id: str) -> dict:
+    try:
+        state = await asyncio.to_thread(
+            context.runtime.start,
+            task_id,
+        )
+    except (KeyError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return state.model_dump(mode="json")
+
+
+@app.post("/tasks/{task_id}/stop")
+async def stop_task(task_id: str) -> dict:
+    try:
+        state = await asyncio.to_thread(
+            context.runtime.stop,
+            task_id,
+        )
+    except (KeyError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return state.model_dump(mode="json")
+
+
+@app.post(
+    "/migrations/activate",
+    response_model=MigrationActivationResponse,
+)
+async def activate_migration(
+    request: MigrationActivationRequest,
+) -> MigrationActivationResponse:
+    return await context.migration_service.activate_incoming(
+        request
+    )
+
+
+@app.post("/ownership")
+async def ownership_update(
+    update: OwnershipUpdate,
+) -> dict:
+    try:
+        applied = context.registry.apply_ownership(
+            task_id=update.task_id,
+            owner_node_id=update.owner_node_id,
+            generation=update.generation,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "applied": applied,
+        "task_id": update.task_id,
+        "owner_node_id": update.owner_node_id,
+        "generation": update.generation,
+    }
