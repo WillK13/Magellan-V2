@@ -20,6 +20,15 @@
   },
 
   "runtime": {
+    "artifacts": [
+      {
+        "artifact_id": "training-dataset",
+        "kind": "dataset",
+        "source_directory": "/home/WILL/magellan-artifacts/llm-001-dataset",
+        "target_relative_directory": "training-dataset"
+      }
+    ],
+
     "module": "magellan.workloads.llm_train",
 
     "arguments": [
@@ -38,7 +47,9 @@
       "--device",
       "cpu",
       "--torch-threads",
-      "2"
+      "2",
+      "--dataset-file",
+      "{artifacts_directory}/training-dataset/train.txt"
     ],
 
     "environment": {
@@ -55,4 +66,5 @@
 
     "stop_timeout_seconds": 120
   }
+  
 }

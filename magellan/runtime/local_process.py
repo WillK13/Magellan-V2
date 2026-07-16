@@ -15,6 +15,7 @@ from magellan.state.task_models import (
     TaskStatus,
 )
 
+from magellan.artifacts.manager import ArtifactManager
 
 def pid_is_alive(pid: int) -> bool:
     try:
@@ -32,11 +33,13 @@ class LocalProcessRuntime:
         registry: PersistentTaskRegistry,
         local_node_id: str,
         repository_root: str | Path,
+        artifact_manager: ArtifactManager,
     ) -> None:
         self._registry = registry
         self._local_node_id = local_node_id
         self._repository_root = Path(repository_root).resolve()
         self._processes: dict[str, subprocess.Popen] = {}
+        self._artifact_manager = artifact_manager
 
     def _render_argument(
         self,
@@ -55,9 +58,15 @@ class LocalProcessRuntime:
                 self._registry.task_directory(task_id)
             ),
             repository_root=str(self._repository_root),
+            artifacts_directory=str(
+                self._registry.artifacts_directory(task_id)
+            ),
         )
 
     def start(self, task_id: str) -> TaskRuntimeState:
+        self._artifact_manager.ensure_task_artifacts(
+            task_id
+        )
         definition = self._registry.get_definition(task_id)
         state = self._registry.get_state(task_id)
 

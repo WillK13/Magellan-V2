@@ -28,6 +28,9 @@ def build_raw_actions(
     graph: ClusterGraph,
     carbon_store: CarbonStore,
     at_utc: str | pd.Timestamp,
+    static_data_bytes_by_destination: (
+        dict[str, int] | None
+    ) = None,
 ) -> list[RawActionEstimate]:
     now = as_utc_timestamp(at_utc)
     source = cluster.get_node(task.current_node_id)
@@ -58,6 +61,16 @@ def build_raw_actions(
 
     for destination in graph.peers(source.id):
         edge = graph.edge(source.id, destination.id)
+        
+        static_data_bytes_override = None
+
+        if static_data_bytes_by_destination is not None:
+            static_data_bytes_override = (
+                static_data_bytes_by_destination.get(
+                    destination.id,
+                    0,
+                )
+            )
 
         migration_estimate = estimate_migrate(
             task=task,
@@ -69,6 +82,9 @@ def build_raw_actions(
             horizon_seconds=policy.horizon_seconds,
             pause_policy=policy.pause,
             migration_policy=policy.migration,
+            static_data_bytes_override=(
+                static_data_bytes_override
+            ),
         )
 
         if (
@@ -213,6 +229,9 @@ def evaluate_task(
     graph: ClusterGraph,
     carbon_store: CarbonStore,
     at_utc: str | pd.Timestamp,
+    static_data_bytes_by_destination: (
+        dict[str, int] | None
+    ) = None,
 ) -> DecisionResult:
     estimates = build_raw_actions(
         task=task,
@@ -221,6 +240,9 @@ def evaluate_task(
         graph=graph,
         carbon_store=carbon_store,
         at_utc=at_utc,
+        static_data_bytes_by_destination=(
+            static_data_bytes_by_destination
+        ),
     )
 
     ranked = score_actions(estimates, policy)

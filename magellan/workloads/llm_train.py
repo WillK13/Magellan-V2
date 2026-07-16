@@ -253,12 +253,45 @@ def parse_args() -> argparse.Namespace:
             "between carbon-aware computing regions."
         ),
     )
+    parser.add_argument(
+        "--dataset-file",
+        default=None,
+    )
 
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    training_text = args.text
+
+    if args.dataset_file is not None:
+        dataset_path = Path(
+            args.dataset_file
+        ).expanduser().resolve()
+
+        if not dataset_path.is_file():
+            raise FileNotFoundError(
+                f"Training dataset does not exist: "
+                f"{dataset_path}"
+            )
+
+        training_text = dataset_path.read_text(
+            encoding="utf-8"
+        ).strip()
+
+        if not training_text:
+            raise ValueError(
+                f"Training dataset is empty: "
+                f"{dataset_path}"
+            )
+
+        print(
+            f"[LLM] dataset={dataset_path} "
+            f"bytes={dataset_path.stat().st_size}",
+            flush=True,
+        )
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
@@ -359,7 +392,7 @@ def main() -> None:
         )
 
     inputs = tokenizer(
-        args.text,
+        training_text,
         return_tensors="pt",
     ).to(device)
 

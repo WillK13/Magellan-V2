@@ -32,6 +32,11 @@ from datetime import datetime
 
 from magellan.runtime.checkpoint import CheckpointManager
 
+from magellan.artifacts.manager import ArtifactManager
+from magellan.artifacts.prefetch import (
+    ArtifactPrefetchService,
+)
+
 
 class MigrationService:
     def __init__(
@@ -44,6 +49,8 @@ class MigrationService:
         client: MigrationClient,
         broadcaster: OwnershipBroadcaster,
         checkpoint_manager: CheckpointManager,
+        artifact_manager: ArtifactManager,
+        prefetch_service: ArtifactPrefetchService,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -53,6 +60,8 @@ class MigrationService:
         self._client = client
         self._broadcaster = broadcaster
         self._checkpoint_manager = checkpoint_manager
+        self._artifact_manager = artifact_manager
+        self._prefetch_service = prefetch_service
 
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -84,6 +93,27 @@ class MigrationService:
 
             migration_id = str(uuid4())
             new_generation = original_state.generation + 1
+
+            try:
+                artifact_bindings = (
+                    await self._prefetch_service.prefetch(
+                        task_id=task_id,
+                        destination_node_id=(
+                            destination_node_id
+                        ),
+                        migration_id=migration_id,
+                    )
+                )
+            except Exception as exc:
+                print(
+                    f"[prefetch-failed] task={task_id} "
+                    f"destination={destination_node_id} "
+                    f"error={type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+                # The source process has not been interrupted.
+                return False
 
             self._registry.mark_migrating(
                 task_id,
@@ -130,6 +160,7 @@ class MigrationService:
                     destination_node_id=destination_node_id,
                     generation=new_generation,
                     migration_at_utc=migration_at_utc,
+                    artifacts=artifact_bindings,
                 )
 
                 response = await self._client.activate(
@@ -156,6 +187,10 @@ class MigrationService:
                         owner_node_id=destination_node_id,
                         generation=new_generation,
                         migration_at_utc=migration_at_utc,
+                        artifact_digests={
+                            binding.artifact_id: binding.digest
+                            for binding in artifact_bindings
+                        },
                     )
                 )
 
@@ -291,11 +326,20 @@ class MigrationService:
                 flush=True,
             )
 
+            self._artifact_manager.stage_bindings(
+                request.task_id,
+                request.artifacts,
+            )
+
             self._registry.claim_local(
                 task_id=request.task_id,
                 generation=request.generation,
                 migration_id=request.migration_id,
                 migration_at_utc=request.migration_at_utc,
+                artifact_digests={
+                    binding.artifact_id: binding.digest
+                    for binding in request.artifacts
+                },
             )
 
             runtime_state = await asyncio.to_thread(

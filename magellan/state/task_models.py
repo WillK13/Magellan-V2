@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from magellan.models.types import TaskProfile
+
+from magellan.artifacts.models import StaticArtifactSpec
 
 
 def utc_now() -> datetime:
@@ -43,6 +45,23 @@ class LocalProcessSpec(BaseModel):
 class TaskDefinition(BaseModel):
     profile: TaskProfile
     runtime: LocalProcessSpec
+    artifacts: list[StaticArtifactSpec] = Field(
+        default_factory=list
+    )
+
+    @model_validator(mode="after")
+    def validate_artifacts(self) -> "TaskDefinition":
+        artifact_ids = [
+            artifact.artifact_id
+            for artifact in self.artifacts
+        ]
+
+        if len(artifact_ids) != len(set(artifact_ids)):
+            raise ValueError(
+                "Artifact IDs must be unique within a task"
+            )
+
+        return self
 
 
 class TaskRuntimeState(BaseModel):
@@ -62,3 +81,6 @@ class TaskRuntimeState(BaseModel):
 
     created_at_utc: datetime = Field(default_factory=utc_now)
     updated_at_utc: datetime = Field(default_factory=utc_now)
+    artifact_digests: dict[str, str] = Field(
+        default_factory=dict
+    )

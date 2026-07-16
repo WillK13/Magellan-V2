@@ -31,6 +31,7 @@ def estimate_migrate(
     horizon_seconds: float,
     pause_policy: PausePolicy,
     migration_policy: MigrationPolicy,
+    static_data_bytes_override: int | None = None,
 ) -> RawActionEstimate:
     compute_seconds = horizon_seconds
 
@@ -40,10 +41,15 @@ def estimate_migrate(
             task.estimated_remaining_seconds,
         )
 
-    static_data_bytes = (
-        0
-        if destination.id in task.prestaged_node_ids
-        else task.data_bytes
+    if static_data_bytes_override is not None:
+        static_data_bytes = (
+            static_data_bytes_override
+        )
+    else:
+        static_data_bytes = (
+            0
+            if destination.id in task.prestaged_node_ids
+            else task.data_bytes
     )
 
     total_transfer_bytes = (

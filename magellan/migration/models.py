@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from magellan.artifacts.models import ArtifactBinding
+
 
 class MigrationActivationRequest(BaseModel):
     migration_id: str = Field(min_length=1)
@@ -14,6 +16,9 @@ class MigrationActivationRequest(BaseModel):
 
     generation: int = Field(ge=1)
     migration_at_utc: datetime
+    artifacts: list[ArtifactBinding] = Field(
+        default_factory=list
+    )
 
 
 class MigrationActivationResponse(BaseModel):
@@ -33,3 +38,6 @@ class OwnershipUpdate(BaseModel):
     generation: int = Field(ge=0)
 
     migration_at_utc: datetime | None = None
+    artifact_digests: dict[str, str] = Field(
+        default_factory=dict
+    )

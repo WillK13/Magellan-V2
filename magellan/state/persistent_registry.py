@@ -87,6 +87,20 @@ class PersistentTaskRegistry:
             self.task_directory(task_id)
             / definition.runtime.checkpoint_relative_path
         )
+    
+    def artifacts_directory(self, task_id: str) -> Path:
+        return self.task_directory(task_id) / "artifacts"
+
+
+    def set_artifact_digests(
+        self,
+        task_id: str,
+        artifact_digests: dict[str, str],
+    ) -> TaskRuntimeState:
+        state = self.get_state(task_id)
+        state.artifact_digests = dict(artifact_digests)
+        return self.set_state(state)
+
     def checkpoint_manifest_file(
         self,
         task_id: str,
@@ -300,6 +314,7 @@ class PersistentTaskRegistry:
         task_id: str,
         generation: int,
         migration_id: str,
+        artifact_digests: dict[str, str],
         migration_at_utc: datetime,
     ) -> TaskRuntimeState:
         state = self.get_state(task_id)
@@ -317,7 +332,8 @@ class PersistentTaskRegistry:
         state.last_migration_id = migration_id
         state.last_migration_at_utc = migration_at_utc
         state.last_error = None
-
+        state.artifact_digests = dict(artifact_digests)
+        
         return self.set_state(state)
 
     def mark_remote(

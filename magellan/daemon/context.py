@@ -37,6 +37,15 @@ from magellan.state.persistent_registry import (
 
 from magellan.runtime.checkpoint import CheckpointManager
 
+from magellan.artifacts.client import ArtifactClient
+from magellan.artifacts.manager import ArtifactManager
+from magellan.artifacts.prefetch import (
+    ArtifactPrefetchService,
+)
+from magellan.artifacts.transfer import (
+    RsyncArtifactTransfer,
+)
+
 
 @dataclass
 class DaemonContext:
@@ -58,6 +67,9 @@ class DaemonContext:
     migration_service: MigrationService
     scheduler_service: SchedulerService
     checkpoint_manager: CheckpointManager
+    artifact_manager: ArtifactManager
+    artifact_client: ArtifactClient
+    prefetch_service: ArtifactPrefetchService
 
 
 def _task_files() -> list[Path]:
@@ -135,6 +147,27 @@ def build_daemon_context() -> DaemonContext:
         local_node_id=local_node.id,
     )
 
+    artifact_manager = ArtifactManager(
+        registry=registry,
+    )
+
+    artifact_client = ArtifactClient(
+        cluster=cluster,
+    )
+
+    artifact_transfer = RsyncArtifactTransfer(
+        cluster=cluster,
+        manager=artifact_manager,
+        ssh_user=ssh_user,
+        remote_state_root=remote_state_root,
+    )
+
+    prefetch_service = ArtifactPrefetchService(
+        manager=artifact_manager,
+        client=artifact_client,
+        transfer=artifact_transfer,
+    )
+
     graph = ClusterGraph(cluster)
 
     carbon_store = CarbonStore(
@@ -148,6 +181,7 @@ def build_daemon_context() -> DaemonContext:
         registry=registry,
         local_node_id=local_node.id,
         repository_root=repository_root,
+        artifact_manager=artifact_manager,
     )
     checkpoint_manager = CheckpointManager(
         registry=registry,
@@ -179,6 +213,8 @@ def build_daemon_context() -> DaemonContext:
         registry=registry,
         runtime=runtime,
         transfer=transfer,
+        artifact_manager=artifact_manager,
+        prefetch_service=prefetch_service,
         checkpoint_manager=checkpoint_manager,
         client=MigrationClient(
             cluster=cluster,
@@ -204,6 +240,7 @@ def build_daemon_context() -> DaemonContext:
         bid_client=bid_client,
         migration_service=migration_service,
         checkpoint_manager=checkpoint_manager,
+        prefetch_service=prefetch_service,
     )
 
     return DaemonContext(
@@ -221,4 +258,7 @@ def build_daemon_context() -> DaemonContext:
         migration_service=migration_service,
         scheduler_service=scheduler_service,
         checkpoint_manager=checkpoint_manager,
+        artifact_manager=artifact_manager,
+        prefetch_service=prefetch_service,
+        artifact_client=artifact_client,
     )

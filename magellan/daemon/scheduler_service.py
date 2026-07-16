@@ -33,6 +33,10 @@ from magellan.runtime.checkpoint import (
     CheckpointValidationError,
 )
 
+from magellan.artifacts.prefetch import (
+    ArtifactPrefetchService,
+)
+
 
 class SchedulerService:
     def __init__(
@@ -48,6 +52,7 @@ class SchedulerService:
         bid_client: BidClient,
         migration_service: MigrationService,
         checkpoint_manager: CheckpointManager,
+        prefetch_service: ArtifactPrefetchService,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -60,6 +65,7 @@ class SchedulerService:
         self._bid_client = bid_client
         self._migration_service = migration_service
         self._checkpoint_manager = checkpoint_manager
+        self._prefetch_service = prefetch_service
 
     async def _evaluate_task(
         self,
@@ -91,6 +97,29 @@ class SchedulerService:
             flush=True,
         )
 
+        static_data_bytes_by_destination: dict[str, int] = {}
+
+        for destination in self._graph.peers(
+            self._local_node.id
+        ):
+            missing_bytes = (
+                await self._prefetch_service.missing_bytes(
+                    task_id=task_id,
+                    destination_node_id=destination.id,
+                )
+            )
+
+            static_data_bytes_by_destination[
+                destination.id
+            ] = missing_bytes
+
+            print(
+                f"[artifact-plan] task={task_id} "
+                f"destination={destination.id} "
+                f"missing_bytes={missing_bytes}",
+                flush=True,
+            )
+
         decision = evaluate_task(
             task=task,
             cluster=self._cluster,
@@ -98,6 +127,9 @@ class SchedulerService:
             graph=self._graph,
             carbon_store=self._carbon_store,
             at_utc=trace_time,
+            static_data_bytes_by_destination=(
+                static_data_bytes_by_destination
+            ),
         )
 
         print(

@@ -20,6 +20,13 @@ from magellan.migration.models import (
     OwnershipUpdate,
 )
 
+from magellan.artifacts.models import (
+    ArtifactCommitRequest,
+    ArtifactCommitResponse,
+    ArtifactStatusRequest,
+    ArtifactStatusResponse,
+)
+
 context = build_daemon_context()
 
 
@@ -252,6 +259,12 @@ async def ownership_update(
             generation=update.generation,
             migration_at_utc=update.migration_at_utc,
         )
+
+        if update.artifact_digests:
+            context.registry.set_artifact_digests(
+                update.task_id,
+                update.artifact_digests,
+            )
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
@@ -264,3 +277,66 @@ async def ownership_update(
         "owner_node_id": update.owner_node_id,
         "generation": update.generation,
     }
+
+@app.post(
+    "/artifacts/status",
+    response_model=ArtifactStatusResponse,
+)
+async def artifact_status(
+    request: ArtifactStatusRequest,
+) -> ArtifactStatusResponse:
+    present: list[str] = []
+    missing: list[str] = []
+
+    for artifact in request.artifacts:
+        if context.artifact_manager.has_artifact(
+            artifact.digest
+        ):
+            present.append(artifact.digest)
+        else:
+            missing.append(artifact.digest)
+
+    return ArtifactStatusResponse(
+        task_id=request.task_id,
+        present_digests=present,
+        missing_digests=missing,
+    )
+
+
+@app.post(
+    "/artifacts/commit",
+    response_model=ArtifactCommitResponse,
+)
+async def commit_artifact(
+    request: ArtifactCommitRequest,
+) -> ArtifactCommitResponse:
+    try:
+        manifest = await asyncio.to_thread(
+            context.artifact_manager.commit_incoming,
+            request.migration_id,
+            request.digest,
+        )
+
+        print(
+            f"[artifact-committed] "
+            f"task={request.task_id} "
+            f"artifact={request.artifact_id} "
+            f"digest={request.digest} "
+            f"bytes={manifest.size_bytes}",
+            flush=True,
+        )
+
+        return ArtifactCommitResponse(
+            artifact_id=request.artifact_id,
+            digest=request.digest,
+            committed=True,
+            size_bytes=manifest.size_bytes,
+        )
+
+    except Exception as exc:
+        return ArtifactCommitResponse(
+            artifact_id=request.artifact_id,
+            digest=request.digest,
+            committed=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
