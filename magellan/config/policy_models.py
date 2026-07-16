@@ -39,7 +39,10 @@ class MigrationPolicy(BaseModel):
     # Explicit energy units.
     network_energy_kwh_per_gb_base: float = Field(default=0.0, ge=0)
     network_energy_kwh_per_gb_km: float = Field(default=0.0, ge=0)
-
+    activation_timeout_seconds: float = Field(
+        default=600.0,
+        gt=0,
+    )
 
 class ClockPolicy(BaseModel):
     mode: Literal["wall", "trace"]

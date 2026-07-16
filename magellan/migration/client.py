@@ -13,8 +13,15 @@ from magellan.migration.models import (
 
 
 class MigrationClient:
-    def __init__(self, cluster: ClusterConfig) -> None:
+    def __init__(
+        self,
+        cluster: ClusterConfig,
+        activation_timeout_seconds: float,
+    ) -> None:
         self._cluster = cluster
+        self._activation_timeout_seconds = (
+            activation_timeout_seconds
+        )
 
     async def activate(
         self,
@@ -30,7 +37,10 @@ class MigrationClient:
         )
 
         timeout = httpx.Timeout(
-            self._cluster.request_timeout_seconds
+            connect=self._cluster.request_timeout_seconds,
+            read=self._activation_timeout_seconds,
+            write=self._cluster.request_timeout_seconds,
+            pool=self._cluster.request_timeout_seconds,
         )
 
         last_error: Exception | None = None
@@ -46,17 +56,20 @@ class MigrationClient:
                     )
                     response.raise_for_status()
 
-                    return MigrationActivationResponse.model_validate(
-                        response.json()
+                    return (
+                        MigrationActivationResponse.model_validate(
+                            response.json()
+                        )
                     )
+
             except (httpx.HTTPError, ValueError) as exc:
                 last_error = exc
 
                 if attempt < 3:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.0)
 
         raise RuntimeError(
-            f"Destination activation failed after retries: "
+            "Destination activation failed after retries: "
             f"{last_error}"
         )
 

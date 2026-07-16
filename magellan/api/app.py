@@ -250,6 +250,7 @@ async def ownership_update(
             task_id=update.task_id,
             owner_node_id=update.owner_node_id,
             generation=update.generation,
+            migration_at_utc=update.migration_at_utc,
         )
     except KeyError as exc:
         raise HTTPException(

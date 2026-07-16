@@ -14,6 +14,7 @@ from magellan.state.task_models import (
     utc_now,
 )
 
+from datetime import datetime
 
 class PersistentTaskRegistry:
     def __init__(
@@ -86,6 +87,31 @@ class PersistentTaskRegistry:
             self.task_directory(task_id)
             / definition.runtime.checkpoint_relative_path
         )
+    def checkpoint_manifest_file(
+        self,
+        task_id: str,
+    ) -> Path | None:
+        definition = self.get_definition(task_id)
+        relative = (
+            definition.runtime.checkpoint_manifest_relative_path
+        )
+
+        if relative is None:
+            return None
+
+        return self.checkpoint_directory(task_id) / relative
+
+    def readiness_file(
+        self,
+        task_id: str,
+    ) -> Path | None:
+        definition = self.get_definition(task_id)
+        relative = definition.runtime.readiness_relative_path
+
+        if relative is None:
+            return None
+
+        return self.task_directory(task_id) / relative
 
     def _state_path(self, task_id: str) -> Path:
         return self.task_directory(task_id) / "state.json"
@@ -181,16 +207,26 @@ class PersistentTaskRegistry:
             )
         ]
 
-    def scoring_profile(self, task_id: str) -> TaskProfile:
+    def scoring_profile(
+        self,
+        task_id: str,
+        checkpoint_bytes: int | None = None,
+    ) -> TaskProfile:
         definition = self.get_definition(task_id)
         state = self.get_state(task_id)
 
+        updates: dict = {
+            "current_node_id": state.owner_node_id,
+            "last_migration_at": state.last_migration_at_utc,
+        }
+
+        if checkpoint_bytes is not None:
+            updates["checkpoint_bytes"] = checkpoint_bytes
+
         return definition.profile.model_copy(
             deep=True,
-            update={
-                "current_node_id": state.owner_node_id,
-            },
-        )
+            update=updates,
+        )    
 
     def set_state(
         self,
@@ -264,6 +300,7 @@ class PersistentTaskRegistry:
         task_id: str,
         generation: int,
         migration_id: str,
+        migration_at_utc: datetime,
     ) -> TaskRuntimeState:
         state = self.get_state(task_id)
 
@@ -278,6 +315,7 @@ class PersistentTaskRegistry:
         state.status = TaskStatus.STOPPED
         state.pid = None
         state.last_migration_id = migration_id
+        state.last_migration_at_utc = migration_at_utc
         state.last_error = None
 
         return self.set_state(state)
@@ -288,6 +326,7 @@ class PersistentTaskRegistry:
         owner_node_id: str,
         generation: int,
         migration_id: str,
+        migration_at_utc: datetime,
     ) -> TaskRuntimeState:
         state = self.get_state(task_id)
 
@@ -296,6 +335,7 @@ class PersistentTaskRegistry:
         state.status = TaskStatus.REMOTE
         state.pid = None
         state.last_migration_id = migration_id
+        state.last_migration_at_utc = migration_at_utc
         state.last_error = None
 
         return self.set_state(state)
@@ -321,18 +361,20 @@ class PersistentTaskRegistry:
         task_id: str,
         owner_node_id: str,
         generation: int,
+        migration_at_utc: datetime | None = None,
     ) -> bool:
         state = self.get_state(task_id)
 
         if generation < state.generation:
             return False
 
-        if owner_node_id == self._local_node_id:
-            state.owner_node_id = owner_node_id
-            state.generation = generation
-        else:
-            state.owner_node_id = owner_node_id
-            state.generation = generation
+        state.owner_node_id = owner_node_id
+        state.generation = generation
+
+        if migration_at_utc is not None:
+            state.last_migration_at_utc = migration_at_utc
+
+        if owner_node_id != self._local_node_id:
             state.status = TaskStatus.REMOTE
             state.pid = None
 

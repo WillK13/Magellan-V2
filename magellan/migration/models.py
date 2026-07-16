@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -11,6 +13,7 @@ class MigrationActivationRequest(BaseModel):
     destination_node_id: str = Field(min_length=1)
 
     generation: int = Field(ge=1)
+    migration_at_utc: datetime
 
 
 class MigrationActivationResponse(BaseModel):
@@ -28,3 +31,5 @@ class OwnershipUpdate(BaseModel):
     task_id: str = Field(min_length=1)
     owner_node_id: str = Field(min_length=1)
     generation: int = Field(ge=0)
+
+    migration_at_utc: datetime | None = None

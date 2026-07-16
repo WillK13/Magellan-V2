@@ -1,0 +1,58 @@
+{
+  "profile": {
+    "task_id": "llm-001",
+    "workload_type": "causal-lm-training",
+    "current_node_id": "boston",
+
+    "power_kw": 0.6,
+    "checkpoint_bytes": 0,
+    "data_bytes": 0,
+
+    "prestaged_node_ids": [
+      "boston",
+      "virginia"
+    ],
+
+    "estimated_remaining_seconds": 86400,
+    "accumulated_cost_usd": 0,
+    "cost_cap_usd": null,
+    "last_migration_at": null
+  },
+
+  "runtime": {
+    "module": "magellan.workloads.llm_train",
+
+    "arguments": [
+      "--checkpoint-dir",
+      "{checkpoint_directory}",
+      "--ready-file",
+      "{task_directory}/runtime/ready.json",
+      "--model",
+      "sshleifer/tiny-gpt2",
+      "--max-steps",
+      "1000000",
+      "--sleep-per-step",
+      "2",
+      "--learning-rate",
+      "0.00005",
+      "--device",
+      "cpu",
+      "--torch-threads",
+      "2"
+    ],
+
+    "environment": {
+      "TOKENIZERS_PARALLELISM": "false"
+    },
+
+    "working_directory": ".",
+
+    "checkpoint_relative_path": "checkpoint/complete.json",
+    "checkpoint_manifest_relative_path": "complete.json",
+
+    "readiness_relative_path": "runtime/ready.json",
+    "readiness_timeout_seconds": 600,
+
+    "stop_timeout_seconds": 120
+  }
+}

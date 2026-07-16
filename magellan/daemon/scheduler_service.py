@@ -28,6 +28,11 @@ from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
 
+from magellan.runtime.checkpoint import (
+    CheckpointManager,
+    CheckpointValidationError,
+)
+
 
 class SchedulerService:
     def __init__(
@@ -42,6 +47,7 @@ class SchedulerService:
         runtime: LocalProcessRuntime,
         bid_client: BidClient,
         migration_service: MigrationService,
+        checkpoint_manager: CheckpointManager,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -53,13 +59,37 @@ class SchedulerService:
         self._runtime = runtime
         self._bid_client = bid_client
         self._migration_service = migration_service
+        self._checkpoint_manager = checkpoint_manager
 
     async def _evaluate_task(
         self,
         task_id: str,
         trace_time,
     ) -> None:
-        task = self._registry.scoring_profile(task_id)
+        try:
+            checkpoint_summary = await asyncio.to_thread(
+                self._checkpoint_manager.validate,
+                task_id,
+            )
+        except CheckpointValidationError as exc:
+            print(
+                f"[scheduler-skip] task={task_id} "
+                f"checkpoint_not_ready={exc}",
+                flush=True,
+            )
+            return
+
+        task = self._registry.scoring_profile(
+            task_id,
+            checkpoint_bytes=checkpoint_summary.size_bytes,
+        )
+
+        print(
+            f"[checkpoint-size] task={task_id} "
+            f"bytes={checkpoint_summary.size_bytes} "
+            f"files={checkpoint_summary.file_count}",
+            flush=True,
+        )
 
         decision = evaluate_task(
             task=task,
@@ -153,6 +183,7 @@ class SchedulerService:
                 destination_node_id=(
                     selected.destination_node_id
                 ),
+                migration_at_utc=trace_time.to_pydatetime(),
             )
 
     async def run_epoch(self) -> None:

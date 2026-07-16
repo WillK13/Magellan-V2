@@ -108,6 +108,15 @@ class LocalProcessRuntime:
             / definition.runtime.working_directory
         ).resolve()
 
+        readiness_file = self._registry.readiness_file(task_id)
+
+        if readiness_file is not None:
+            readiness_file.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            readiness_file.unlink(missing_ok=True)
+
         log_file = log_path.open("a", encoding="utf-8")
 
         try:
@@ -122,15 +131,20 @@ class LocalProcessRuntime:
         finally:
             log_file.close()
 
-        time.sleep(0.25)
-
-        if process.poll() is not None:
-            error = (
-                f"Task {task_id} exited immediately "
-                f"with code {process.returncode}"
+        try:
+            self._wait_for_readiness(
+                task_id=task_id,
+                process=process,
             )
+        except Exception as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+            error = f"{type(exc).__name__}: {exc}"
             self._registry.mark_failed(task_id, error)
-            raise RuntimeError(error)
+            raise RuntimeError(error) from exc
 
         self._processes[task_id] = process
 
@@ -210,3 +224,43 @@ class LocalProcessRuntime:
                     state.task_id,
                     "Persisted process is no longer running",
                 )
+    def _wait_for_readiness(
+        self,
+        task_id: str,
+        process: subprocess.Popen,
+    ) -> None:
+        definition = self._registry.get_definition(task_id)
+        readiness_file = self._registry.readiness_file(task_id)
+
+        if readiness_file is None:
+            time.sleep(0.25)
+
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"Task {task_id} exited immediately "
+                    f"with code {process.returncode}"
+                )
+
+            return
+
+        deadline = (
+            time.monotonic()
+            + definition.runtime.readiness_timeout_seconds
+        )
+
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"Task {task_id} exited before becoming ready "
+                    f"with code {process.returncode}"
+                )
+
+            if readiness_file.is_file():
+                return
+
+            time.sleep(0.25)
+
+        raise TimeoutError(
+            f"Task {task_id} did not become ready within "
+            f"{definition.runtime.readiness_timeout_seconds}s"
+        )

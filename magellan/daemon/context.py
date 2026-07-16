@@ -35,6 +35,8 @@ from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
 
+from magellan.runtime.checkpoint import CheckpointManager
+
 
 @dataclass
 class DaemonContext:
@@ -55,6 +57,7 @@ class DaemonContext:
 
     migration_service: MigrationService
     scheduler_service: SchedulerService
+    checkpoint_manager: CheckpointManager
 
 
 def _task_files() -> list[Path]:
@@ -146,6 +149,9 @@ def build_daemon_context() -> DaemonContext:
         local_node_id=local_node.id,
         repository_root=repository_root,
     )
+    checkpoint_manager = CheckpointManager(
+        registry=registry,
+    )
 
     runtime.reconcile()
 
@@ -173,7 +179,13 @@ def build_daemon_context() -> DaemonContext:
         registry=registry,
         runtime=runtime,
         transfer=transfer,
-        client=MigrationClient(cluster),
+        checkpoint_manager=checkpoint_manager,
+        client=MigrationClient(
+            cluster=cluster,
+            activation_timeout_seconds=(
+                policy.migration.activation_timeout_seconds
+            ),
+        ),
         broadcaster=OwnershipBroadcaster(
             cluster=cluster,
             local_node_id=local_node.id,
@@ -191,6 +203,7 @@ def build_daemon_context() -> DaemonContext:
         runtime=runtime,
         bid_client=bid_client,
         migration_service=migration_service,
+        checkpoint_manager=checkpoint_manager,
     )
 
     return DaemonContext(
@@ -207,4 +220,5 @@ def build_daemon_context() -> DaemonContext:
         bid_client=bid_client,
         migration_service=migration_service,
         scheduler_service=scheduler_service,
+        checkpoint_manager=checkpoint_manager,
     )

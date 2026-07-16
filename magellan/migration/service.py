@@ -28,6 +28,10 @@ from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
 
+from datetime import datetime
+
+from magellan.runtime.checkpoint import CheckpointManager
+
 
 class MigrationService:
     def __init__(
@@ -39,6 +43,7 @@ class MigrationService:
         transfer: RsyncCheckpointTransfer,
         client: MigrationClient,
         broadcaster: OwnershipBroadcaster,
+        checkpoint_manager: CheckpointManager,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -47,6 +52,7 @@ class MigrationService:
         self._transfer = transfer
         self._client = client
         self._broadcaster = broadcaster
+        self._checkpoint_manager = checkpoint_manager
 
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -60,6 +66,7 @@ class MigrationService:
         self,
         task_id: str,
         destination_node_id: str,
+        migration_at_utc: datetime,
     ) -> bool:
         async with self._lock_for(task_id):
             original_state = self._registry.get_state(task_id)
@@ -97,6 +104,18 @@ class MigrationService:
                     task_id,
                 )
 
+                checkpoint_summary = await asyncio.to_thread(
+                    self._checkpoint_manager.validate,
+                    task_id,
+                )
+
+                print(
+                    f"[checkpoint-valid] task={task_id} "
+                    f"bytes={checkpoint_summary.size_bytes} "
+                    f"files={checkpoint_summary.file_count}",
+                    flush=True,
+                )
+
                 await asyncio.to_thread(
                     self._transfer.send,
                     task_id,
@@ -110,6 +129,7 @@ class MigrationService:
                     source_node_id=self._local_node.id,
                     destination_node_id=destination_node_id,
                     generation=new_generation,
+                    migration_at_utc=migration_at_utc,
                 )
 
                 response = await self._client.activate(
@@ -127,6 +147,7 @@ class MigrationService:
                     owner_node_id=destination_node_id,
                     generation=new_generation,
                     migration_id=migration_id,
+                    migration_at_utc=migration_at_utc,
                 )
 
                 await self._broadcaster.broadcast(
@@ -134,6 +155,7 @@ class MigrationService:
                         task_id=task_id,
                         owner_node_id=destination_node_id,
                         generation=new_generation,
+                        migration_at_utc=migration_at_utc,
                     )
                 )
 
@@ -256,10 +278,24 @@ class MigrationService:
                 local_checkpoint,
             )
 
+            checkpoint_summary = await asyncio.to_thread(
+                self._checkpoint_manager.validate,
+                request.task_id,
+            )
+
+            print(
+                f"[incoming-checkpoint-valid] "
+                f"task={request.task_id} "
+                f"bytes={checkpoint_summary.size_bytes} "
+                f"files={checkpoint_summary.file_count}",
+                flush=True,
+            )
+
             self._registry.claim_local(
                 task_id=request.task_id,
                 generation=request.generation,
                 migration_id=request.migration_id,
+                migration_at_utc=request.migration_at_utc,
             )
 
             runtime_state = await asyncio.to_thread(
@@ -274,6 +310,13 @@ class MigrationService:
                 f"pid={runtime_state.pid} "
                 f"generation={request.generation}",
                 flush=True,
+            )
+
+            shutil.rmtree(
+                self._registry.state_root
+                / "incoming"
+                / request.migration_id,
+                ignore_errors=True,
             )
 
             return MigrationActivationResponse(
