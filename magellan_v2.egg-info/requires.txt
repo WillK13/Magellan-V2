@@ -1,0 +1,12 @@
+fastapi<1,>=0.115
+uvicorn[standard]<1,>=0.34
+httpx<1,>=0.28
+pydantic<3,>=2.10
+pydantic-settings<3,>=2.7
+pandas<3,>=2.2
+
+[dev]
+pytest<9,>=8.3
+pytest-asyncio<1,>=0.25
+ruff<1,>=0.9
+mypy<2,>=1.14

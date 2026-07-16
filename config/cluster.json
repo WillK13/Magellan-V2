@@ -1,0 +1,64 @@
+{
+  "api_port": 8040,
+  "epoch_seconds": 900,
+  "bid_window_seconds": 10,
+  "request_timeout_seconds": 5,
+  "nodes": [
+    {
+      "id": "boston",
+      "name": "Boston",
+      "zone": "us-east1-c",
+      "internal_ip": "10.142.0.2",
+      "carbon_region": "Boston_24H",
+      "capacity": 1
+    },
+    {
+      "id": "california",
+      "name": "California",
+      "zone": "us-west2-c",
+      "internal_ip": "10.168.0.2",
+      "carbon_region": "California_24H",
+      "capacity": 1
+    },
+    {
+      "id": "south-australia",
+      "name": "South Australia",
+      "zone": "australia-southeast2-a",
+      "internal_ip": "10.192.0.2",
+      "carbon_region": "South_Australia_24H",
+      "capacity": 1
+    },
+    {
+      "id": "nepal",
+      "name": "Nepal",
+      "zone": "asia-south2-b",
+      "internal_ip": "10.190.0.2",
+      "carbon_region": "Nepal_24H",
+      "capacity": 1
+    },
+    {
+      "id": "ethiopia",
+      "name": "Ethiopia",
+      "zone": "me-west1-b",
+      "internal_ip": "10.208.0.2",
+      "carbon_region": "Ethiopia_24H",
+      "capacity": 1
+    },
+    {
+      "id": "france",
+      "name": "France",
+      "zone": "europe-west9-b",
+      "internal_ip": "10.200.0.2",
+      "carbon_region": "France_24H",
+      "capacity": 1
+    },
+    {
+      "id": "virginia",
+      "name": "Virginia",
+      "zone": "northamerica-northeast1-c",
+      "internal_ip": "10.162.0.2",
+      "carbon_region": "Virginia_24H",
+      "capacity": 1
+    }
+  ]
+}
