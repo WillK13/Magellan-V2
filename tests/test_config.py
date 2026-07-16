@@ -1,10 +1,24 @@
+from pathlib import Path
+
 from magellan.config.loader import load_cluster_config
 
 
-def test_cluster_config_loads() -> None:
-    config = load_cluster_config("config/cluster.json")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEV_CLUSTER_PATH = REPO_ROOT / "config" / "cluster.dev.json"
 
-    assert len(config.nodes) == 7
+
+def test_dev_cluster_config_loads() -> None:
+    config = load_cluster_config(DEV_CLUSTER_PATH)
+
+    assert len(config.nodes) == 2
     assert config.api_port == 8040
-    assert config.epoch_seconds == 900
-    assert config.get_node("france").zone == "europe-west9-b"
+    assert config.epoch_seconds == 30
+
+    boston = config.get_node("boston")
+    virginia = config.get_node("virginia")
+
+    assert boston.zone == "us-east1-c"
+    assert str(boston.internal_ip) == "10.142.0.2"
+
+    assert virginia.zone == "northamerica-northeast1-c"
+    assert str(virginia.internal_ip) == "10.162.0.2"

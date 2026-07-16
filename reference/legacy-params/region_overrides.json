@@ -1,0 +1,19 @@
+{
+  "regions": {
+    "Boston_24H":          { "price_kwh": 0.23, "pue": 1.30 },
+    "California_24H":      { "price_kwh": 0.24, "pue": 1.12 },
+    "New_Mexico_24H":      { "price_kwh": 0.12, "pue": 1.10 },
+    "France_24H":          { "price_kwh": 0.18, "pue": 1.30 },
+    "West_Denmark_24H":    { "price_kwh": 0.24, "pue": 1.10 },
+    "New_Zealand_24H":     { "price_kwh": 0.10, "pue": 1.30 },
+    "South_Australia_24H": { "price_kwh": 0.25, "pue": 1.30 },
+    "Kenya_24H":           { "price_kwh": 0.20, "pue": 1.25 },
+    "Ethiopia_24H":        { "price_kwh": 0.07, "pue": 1.25 },
+    "Bhutan_24H":          { "price_kwh": 0.06, "pue": 1.30 },
+    "Nepal_24H":           { "price_kwh": 0.09, "pue": 1.30 },
+    "GB_2024_hourly":      { "price_kwh": 0.28, "pue": 1.20 },
+    "JP-KY_2024_hourly":   { "price_kwh": 0.26, "pue": 1.25 },
+    "BR-S_2024_hourly":    { "price_kwh": 0.14, "pue": 1.40 },
+    "MZ_2024_hourly":      { "price_kwh": 0.12, "pue": 1.55 }
+  }
+}

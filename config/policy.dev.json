@@ -1,0 +1,30 @@
+{
+  "horizon_seconds": 3600,
+
+  "weights": {
+    "time": 0.25,
+    "carbon": 0.50,
+    "cost": 0.25
+  },
+
+  "pause": {
+    "pause_seconds": 120,
+    "idle_seconds": 300,
+    "resume_seconds": 120,
+    "max_pause_window_seconds": 7200
+  },
+
+  "migration": {
+    "min_migration_gap_seconds": 60,
+    "required_improvement_fraction": 0.04,
+
+    "network_energy_kwh_per_gb_base": 0.001,
+    "network_energy_kwh_per_gb_km": 0.0000001
+  },
+
+  "clock": {
+    "mode": "trace",
+    "trace_start_utc": "2024-01-01T00:00:00Z",
+    "trace_seconds_per_real_second": 60
+  }
+}
