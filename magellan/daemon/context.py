@@ -57,6 +57,8 @@ from magellan.artifacts.transfer import (
 from magellan.submission.catalog import TaskCatalogStore
 from magellan.submission.client import TaskCatalogClient
 from magellan.submission.service import TaskSubmissionService
+from magellan.telemetry.service import TelemetryService
+from magellan.telemetry.store import TelemetryStore
 
 
 @dataclass
@@ -90,6 +92,8 @@ class DaemonContext:
     reconciliation_service: DistributedReconciliationService
     task_catalog: TaskCatalogStore
     submission_service: TaskSubmissionService
+    telemetry_store: TelemetryStore
+    telemetry_service: TelemetryService
 
 
 def _task_files() -> list[Path]:
@@ -200,7 +204,16 @@ def build_daemon_context() -> DaemonContext:
         transfer=artifact_transfer,
     )
 
-    graph = ClusterGraph(cluster)
+    telemetry_store = TelemetryStore(
+        state_root=state_root,
+        ema_alpha=policy.telemetry.ema_alpha,
+    )
+
+    graph = ClusterGraph(
+        cluster,
+        telemetry_store=telemetry_store,
+        telemetry_policy=policy.telemetry,
+    )
 
     carbon_store = CarbonStore(
         cluster=cluster,
@@ -224,6 +237,14 @@ def build_daemon_context() -> DaemonContext:
         registry=registry,
     )
 
+    telemetry_service = TelemetryService(
+        local_node=local_node,
+        cluster=cluster,
+        policy=policy.telemetry,
+        registry=registry,
+        store=telemetry_store,
+    )
+
     accounting_service = RuntimeAccountingService(
         local_node=local_node,
         cluster=cluster,
@@ -232,6 +253,7 @@ def build_daemon_context() -> DaemonContext:
         carbon_store=carbon_store,
         clock=clock,
         registry=registry,
+        telemetry_store=telemetry_store,
     )
 
     pause_service = PauseService(
@@ -291,6 +313,7 @@ def build_daemon_context() -> DaemonContext:
         accounting_service=accounting_service,
         journal=migration_journal,
         reconciliation_policy=policy.reconciliation,
+        telemetry_store=telemetry_store,
         client=MigrationClient(
             cluster=cluster,
             activation_timeout_seconds=(
@@ -324,6 +347,7 @@ def build_daemon_context() -> DaemonContext:
         broadcaster=broadcaster,
         pause_service=pause_service,
         accounting_service=accounting_service,
+        telemetry_service=telemetry_service,
     )
 
     submission_service = TaskSubmissionService(
@@ -376,4 +400,6 @@ def build_daemon_context() -> DaemonContext:
         reconciliation_service=reconciliation_service,
         task_catalog=task_catalog,
         submission_service=submission_service,
+        telemetry_store=telemetry_store,
+        telemetry_service=telemetry_service,
     )

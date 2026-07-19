@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import asin, cos, radians, sin, sqrt
+from typing import TYPE_CHECKING
 
 from magellan.config.models import ClusterConfig
+from magellan.telemetry.models import TelemetryFreshness
+
+if TYPE_CHECKING:
+    from magellan.config.policy_models import TelemetryPolicy
+    from magellan.telemetry.store import TelemetryStore
 
 
 @dataclass(frozen=True)
@@ -13,6 +19,13 @@ class EdgeMetrics:
     distance_km: float
     bandwidth_mbps: float
     latency_ms: float
+    bandwidth_source: str = "configured_fallback"
+    latency_source: str = "configured_fallback"
+    bandwidth_freshness: TelemetryFreshness = TelemetryFreshness.UNAVAILABLE
+    latency_freshness: TelemetryFreshness = TelemetryFreshness.UNAVAILABLE
+    checkpoint_seconds: float | None = None
+    restore_seconds: float | None = None
+    calibration_source: str = "configured_fallback"
 
 
 def haversine_distance_km(
@@ -40,8 +53,15 @@ def haversine_distance_km(
 
 
 class ClusterGraph:
-    def __init__(self, cluster: ClusterConfig) -> None:
+    def __init__(
+        self,
+        cluster: ClusterConfig,
+        telemetry_store: TelemetryStore | None = None,
+        telemetry_policy: TelemetryPolicy | None = None,
+    ) -> None:
         self._cluster = cluster
+        self._telemetry_store = telemetry_store
+        self._telemetry_policy = telemetry_policy
 
     def peers(self, node_id: str):
         return [node for node in self._cluster.nodes if node.id != node_id]
@@ -59,16 +79,51 @@ class ClusterGraph:
             destination_node_id,
         )
 
-        bandwidth_mbps = (
+        configured_bandwidth = (
             override.bandwidth_mbps
             if override
             else self._cluster.default_bandwidth_mbps
         )
-        latency_ms = (
+        configured_latency = (
             override.latency_ms
             if override
             else self._cluster.default_latency_ms
         )
+
+        bandwidth = configured_bandwidth
+        latency = configured_latency
+        bandwidth_source = "configured_fallback"
+        latency_source = "configured_fallback"
+        bandwidth_freshness = TelemetryFreshness.UNAVAILABLE
+        latency_freshness = TelemetryFreshness.UNAVAILABLE
+        checkpoint_seconds = None
+        restore_seconds = None
+        calibration_source = "configured_fallback"
+
+        if self._telemetry_store is not None and self._telemetry_policy is not None:
+            view = self._telemetry_store.edge_view(
+                source_node_id,
+                destination_node_id,
+                configured_bandwidth,
+                configured_latency,
+                self._telemetry_policy.edge_stale_after_seconds,
+            )
+            bandwidth = view.effective_bandwidth_mbps
+            latency = view.effective_latency_ms
+            bandwidth_source = view.bandwidth_source
+            latency_source = view.latency_source
+            bandwidth_freshness = view.bandwidth_freshness
+            latency_freshness = view.latency_freshness
+
+            calibration = self._telemetry_store.calibration_view(
+                source_node_id,
+                destination_node_id,
+                self._telemetry_policy.calibration_stale_after_seconds,
+            )
+            if calibration.freshness == TelemetryFreshness.FRESH:
+                checkpoint_seconds = calibration.checkpoint_seconds_ema
+                restore_seconds = calibration.restore_seconds_ema
+                calibration_source = "measured_migration_ema"
 
         distance_km = haversine_distance_km(
             source.latitude,
@@ -81,6 +136,13 @@ class ClusterGraph:
             source_node_id=source_node_id,
             destination_node_id=destination_node_id,
             distance_km=distance_km,
-            bandwidth_mbps=bandwidth_mbps,
-            latency_ms=latency_ms,
+            bandwidth_mbps=bandwidth,
+            latency_ms=latency,
+            bandwidth_source=bandwidth_source,
+            latency_source=latency_source,
+            bandwidth_freshness=bandwidth_freshness,
+            latency_freshness=latency_freshness,
+            checkpoint_seconds=checkpoint_seconds,
+            restore_seconds=restore_seconds,
+            calibration_source=calibration_source,
         )

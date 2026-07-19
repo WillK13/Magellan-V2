@@ -2,9 +2,11 @@
 
 Decentralized carbon-aware scheduling and stateful checkpoint migration.
 
-Current milestone: tasks compete for destination capacity through configurable resource-aware auctions with durable fairness credit, fallback-regret ranking, and CPU/memory/GPU admission control.
+Current milestone: durable live telemetry replaces configured task, power, network, and migration-overhead estimates when fresh measurements are available, with automatic stale-data fallback.
 
-- Implementation and GCP validation: `docs/milestones/resource-aware-auction.md`
+- Implementation and GCP validation: `docs/milestones/telemetry-live-models.md`
+- Telemetry model contract: `docs/design/telemetry-contract.md`
+- Resource-aware task auctions: `docs/milestones/resource-aware-auction.md`
 - Task-to-location auction policies: `docs/design/task-bidding-market.md`
 - Dynamic task submission: `docs/milestones/dynamic-task-submission.md`
 - Durable reconciliation: `docs/milestones/durable-distributed-reconciliation.md`

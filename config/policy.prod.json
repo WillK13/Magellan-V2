@@ -49,5 +49,17 @@
     "accepted_credit_decay": 0.0,
     "deadline_urgency_window_seconds": 3600.0,
     "resource_efficiency_floor": 0.01
+  },
+  "telemetry": {
+    "enabled": true,
+    "task_scan_interval_seconds": 5,
+    "edge_probe_interval_seconds": 30,
+    "task_stale_after_seconds": 30,
+    "edge_stale_after_seconds": 180,
+    "calibration_stale_after_seconds": 21600,
+    "ema_alpha": 0.25,
+    "power_idle_fraction": 0.2,
+    "cpu_power_confidence": 0.75,
+    "fallback_power_confidence": 0.25
   }
 }

@@ -14,6 +14,11 @@ from magellan.bidding.models import (
     BidStatus,
 )
 from magellan.daemon.context import build_daemon_context
+from magellan.telemetry.models import (
+    EdgeTelemetryView,
+    MigrationCalibrationView,
+    TaskTelemetryView,
+)
 
 from magellan.migration.models import (
     MigrationActivationRequest,
@@ -65,6 +70,10 @@ async def lifespan(_: FastAPI):
             name="magellan-pause",
         ),
         asyncio.create_task(
+            context.telemetry_service.run(stop_event),
+            name="magellan-telemetry",
+        ),
+        asyncio.create_task(
             context.accounting_service.run(stop_event),
             name="magellan-accounting",
         ),
@@ -102,7 +111,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.7.0",
+    version="0.8.0",
     lifespan=lifespan,
 )
 
@@ -162,6 +171,16 @@ async def health() -> dict:
         "last_reconciliation_updates": (
             context.reconciliation_service.last_applied_updates
         ),
+        "telemetry_task_record_count": len(
+            context.telemetry_store.list_task_records()
+        ),
+        "telemetry_edge_record_count": len(
+            context.telemetry_store.list_edge_records()
+        ),
+        "telemetry_calibration_count": len(
+            context.telemetry_store.list_calibrations()
+        ),
+        "telemetry_state_file": str(context.telemetry_store.path),
         "timestamp_utc": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -274,6 +293,149 @@ async def get_task_run(run_id: str) -> TaskRunView:
 @app.get("/catalog/snapshot", response_model=TaskCatalogSnapshot)
 async def catalog_snapshot() -> TaskCatalogSnapshot:
     return context.task_catalog.snapshot()
+
+@app.get("/telemetry")
+async def telemetry_summary() -> dict:
+    task_views = []
+    for state in context.registry.all_states():
+        configured_power = context.registry.get_definition(
+            state.task_id
+        ).profile.power_kw
+        task_views.append(
+            context.telemetry_store.task_view(
+                state.task_id,
+                configured_power,
+                context.policy.telemetry.task_stale_after_seconds,
+            ).model_dump(mode="json")
+        )
+
+    edge_views = []
+    for node in context.cluster.nodes:
+        if node.id == context.local_node.id:
+            continue
+        configured = context.cluster.get_edge_override(
+            context.local_node.id, node.id
+        )
+        bandwidth = (
+            configured.bandwidth_mbps
+            if configured is not None
+            else context.cluster.default_bandwidth_mbps
+        )
+        latency = (
+            configured.latency_ms
+            if configured is not None
+            else context.cluster.default_latency_ms
+        )
+        edge_views.append(
+            context.telemetry_store.edge_view(
+                context.local_node.id,
+                node.id,
+                bandwidth,
+                latency,
+                context.policy.telemetry.edge_stale_after_seconds,
+            ).model_dump(mode="json")
+        )
+
+    return {
+        "node_id": context.local_node.id,
+        "task_telemetry": task_views,
+        "edge_telemetry": edge_views,
+        "calibration": [
+            context.telemetry_store.calibration_view(
+                record.source_node_id,
+                record.destination_node_id,
+                context.policy.telemetry.calibration_stale_after_seconds,
+            ).model_dump(mode="json")
+            for record in context.telemetry_store.list_calibrations()
+        ],
+    }
+
+
+@app.get("/telemetry/tasks", response_model=list[TaskTelemetryView])
+async def task_telemetry() -> list[TaskTelemetryView]:
+    return [
+        context.telemetry_store.task_view(
+            state.task_id,
+            context.registry.get_definition(state.task_id).profile.power_kw,
+            context.policy.telemetry.task_stale_after_seconds,
+        )
+        for state in context.registry.all_states()
+    ]
+
+
+@app.get("/telemetry/tasks/{task_id}", response_model=TaskTelemetryView)
+async def task_telemetry_detail(task_id: str) -> TaskTelemetryView:
+    try:
+        definition = context.registry.get_definition(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return context.telemetry_store.task_view(
+        task_id,
+        definition.profile.power_kw,
+        context.policy.telemetry.task_stale_after_seconds,
+    )
+
+
+@app.get("/telemetry/edges", response_model=list[EdgeTelemetryView])
+async def edge_telemetry() -> list[EdgeTelemetryView]:
+    result = []
+    for node in context.cluster.nodes:
+        if node.id == context.local_node.id:
+            continue
+        configured = context.cluster.get_edge_override(
+            context.local_node.id, node.id
+        )
+        result.append(
+            context.telemetry_store.edge_view(
+                context.local_node.id,
+                node.id,
+                (configured.bandwidth_mbps if configured else context.cluster.default_bandwidth_mbps),
+                (configured.latency_ms if configured else context.cluster.default_latency_ms),
+                context.policy.telemetry.edge_stale_after_seconds,
+            )
+        )
+    return result
+
+
+@app.get(
+    "/telemetry/edges/{destination_node_id}",
+    response_model=EdgeTelemetryView,
+)
+async def edge_telemetry_detail(
+    destination_node_id: str,
+) -> EdgeTelemetryView:
+    try:
+        context.cluster.get_node(destination_node_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if destination_node_id == context.local_node.id:
+        raise HTTPException(status_code=400, detail="Destination must be a peer")
+    configured = context.cluster.get_edge_override(
+        context.local_node.id, destination_node_id
+    )
+    return context.telemetry_store.edge_view(
+        context.local_node.id,
+        destination_node_id,
+        (configured.bandwidth_mbps if configured else context.cluster.default_bandwidth_mbps),
+        (configured.latency_ms if configured else context.cluster.default_latency_ms),
+        context.policy.telemetry.edge_stale_after_seconds,
+    )
+
+
+@app.get(
+    "/telemetry/calibration",
+    response_model=list[MigrationCalibrationView],
+)
+async def telemetry_calibration() -> list[MigrationCalibrationView]:
+    return [
+        context.telemetry_store.calibration_view(
+            record.source_node_id,
+            record.destination_node_id,
+            context.policy.telemetry.calibration_stale_after_seconds,
+        )
+        for record in context.telemetry_store.list_calibrations()
+    ]
+
 
 @app.get("/auction/status")
 async def auction_status() -> dict:

@@ -60,6 +60,17 @@ class AccountingPolicy(BaseModel):
     progress_ema_alpha: float = Field(default=0.5, gt=0, le=1)
 
 
+class TelemetryPolicy(BaseModel):
+    enabled: bool = True
+    task_scan_interval_seconds: float = Field(default=1.0, gt=0)
+    edge_probe_interval_seconds: float = Field(default=15.0, gt=0)
+    task_stale_after_seconds: float = Field(default=10.0, gt=0)
+    edge_stale_after_seconds: float = Field(default=120.0, gt=0)
+    calibration_stale_after_seconds: float = Field(default=3600.0, gt=0)
+    ema_alpha: float = Field(default=0.35, gt=0, le=1)
+    power_idle_fraction: float = Field(default=0.2, ge=0, le=1)
+    cpu_power_confidence: float = Field(default=0.75, ge=0, le=1)
+    fallback_power_confidence: float = Field(default=0.25, ge=0, le=1)
 
 
 class ReconciliationPolicy(BaseModel):
@@ -112,6 +123,7 @@ class ScoringPolicy(BaseModel):
     migration: MigrationPolicy
     recovery: RecoveryPolicy = Field(default_factory=RecoveryPolicy)
     accounting: AccountingPolicy = Field(default_factory=AccountingPolicy)
+    telemetry: TelemetryPolicy = Field(default_factory=TelemetryPolicy)
     reconciliation: ReconciliationPolicy = Field(
         default_factory=ReconciliationPolicy
     )

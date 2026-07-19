@@ -33,6 +33,7 @@ from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
 from magellan.state.task_models import TaskStatus
+from magellan.telemetry.service import TelemetryService
 
 from magellan.runtime.checkpoint import (
     CheckpointManager,
@@ -62,6 +63,7 @@ class SchedulerService:
         broadcaster: OwnershipBroadcaster,
         pause_service: PauseService,
         accounting_service: RuntimeAccountingService,
+        telemetry_service: TelemetryService | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -78,6 +80,7 @@ class SchedulerService:
         self._broadcaster = broadcaster
         self._pause_service = pause_service
         self._accounting_service = accounting_service
+        self._telemetry_service = telemetry_service
         self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
         self._task_operation_locks: dict[str, asyncio.Lock] = {}
 
@@ -115,6 +118,15 @@ class SchedulerService:
                 fallback.score - candidate.score,
             )
 
+        telemetry_view = None
+        telemetry_service = getattr(self, "_telemetry_service", None)
+        if telemetry_service is not None:
+            telemetry_view = telemetry_service.store.task_view(
+                task.task_id,
+                task.power_kw,
+                self._policy.telemetry.task_stale_after_seconds,
+            )
+
         return TaskBidContext(
             workload_type=task.workload_type,
             priority=task.priority,
@@ -137,6 +149,26 @@ class SchedulerService:
                 fallback.score if fallback is not None else None
             ),
             opportunity_loss=opportunity_loss,
+            effective_power_kw=(
+                telemetry_view.effective_power_kw
+                if telemetry_view is not None
+                else task.power_kw
+            ),
+            power_source=(
+                telemetry_view.effective_power_source
+                if telemetry_view is not None
+                else "configured_fallback"
+            ),
+            power_confidence=(
+                telemetry_view.power_confidence
+                if telemetry_view is not None
+                else None
+            ),
+            telemetry_freshness=(
+                telemetry_view.freshness.value
+                if telemetry_view is not None
+                else "unavailable"
+            ),
         )
 
     def _task_operation_lock(self, task_id: str) -> asyncio.Lock:
@@ -196,6 +228,8 @@ class SchedulerService:
             task_id,
             checkpoint_bytes=checkpoint_summary.size_bytes,
         )
+        if self._telemetry_service is not None:
+            task = self._telemetry_service.enrich_profile(task)
 
         print(
             f"[checkpoint-size] task={task_id} "
@@ -489,6 +523,8 @@ class SchedulerService:
             task_id,
             checkpoint_bytes=checkpoint_summary.size_bytes,
         )
+        if self._telemetry_service is not None:
+            task = self._telemetry_service.enrich_profile(task)
         missing_bytes = await self._prefetch_service.missing_bytes(
             task_id=task_id,
             destination_node_id=destination_node_id,

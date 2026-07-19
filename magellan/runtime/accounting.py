@@ -8,6 +8,7 @@ import pandas as pd
 from magellan.carbon.store import CarbonStore
 from magellan.config.models import ClusterConfig, NodeConfig
 from magellan.config.policy_models import AccountingPolicy, ScoringPolicy
+from magellan.telemetry.store import TelemetryStore
 from magellan.graph.topology import ClusterGraph
 from magellan.models.utils import bytes_to_gb, seconds_to_hours
 from magellan.runtime.clock import MagellanClock
@@ -27,6 +28,7 @@ class RuntimeAccountingService:
         carbon_store: CarbonStore,
         clock: MagellanClock,
         registry: PersistentTaskRegistry,
+        telemetry_store: TelemetryStore | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -36,6 +38,7 @@ class RuntimeAccountingService:
         self._carbon_store = carbon_store
         self._clock = clock
         self._registry = registry
+        self._telemetry_store = telemetry_store
 
     def _as_wall_datetime(
         self,
@@ -209,12 +212,17 @@ class RuntimeAccountingService:
                     period_start,
                     elapsed_eval_seconds,
                 )
-                effective_power = (
-                    self._registry.get_definition(
-                        task_id
-                    ).profile.power_kw
-                    * self._local_node.pue
-                )
+                configured_power = self._registry.get_definition(
+                    task_id
+                ).profile.power_kw
+                task_power = configured_power
+                if self._telemetry_store is not None:
+                    task_power = self._telemetry_store.task_view(
+                        task_id,
+                        configured_power,
+                        self._policy.telemetry.task_stale_after_seconds,
+                    ).effective_power_kw
+                effective_power = task_power * self._local_node.pue
                 compute_carbon = (
                     effective_power
                     * compute_hours

@@ -32,6 +32,7 @@ from magellan.runtime.checkpoint import CheckpointManager
 from magellan.runtime.local_process import LocalProcessRuntime
 from magellan.state.persistent_registry import PersistentTaskRegistry
 from magellan.state.task_models import TaskStatus
+from magellan.telemetry.store import TelemetryStore
 
 
 class MigrationService:
@@ -52,6 +53,7 @@ class MigrationService:
         accounting_service: RuntimeAccountingService | None = None,
         journal: MigrationJournal | None = None,
         reconciliation_policy: ReconciliationPolicy | None = None,
+        telemetry_store: TelemetryStore | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -70,6 +72,7 @@ class MigrationService:
         self._reconciliation_policy = (
             reconciliation_policy or ReconciliationPolicy()
         )
+        self._telemetry_store = telemetry_store
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, task_id: str) -> asyncio.Lock:
@@ -312,6 +315,10 @@ class MigrationService:
             )
             source_was_stopped = False
             activated = False
+            checkpoint_seconds = 0.0
+            transfer_seconds = 0.0
+            activation_seconds = 0.0
+            restore_seconds = 0.0
 
             try:
                 missing_artifact_bytes = 0
@@ -367,6 +374,7 @@ class MigrationService:
                     flush=True,
                 )
 
+                checkpoint_started = time.monotonic()
                 await asyncio.to_thread(
                     self._runtime.stop,
                     task_id,
@@ -377,6 +385,7 @@ class MigrationService:
                     self._checkpoint_manager.validate,
                     task_id,
                 )
+                checkpoint_seconds = time.monotonic() - checkpoint_started
 
                 print(
                     f"[checkpoint-valid] task={task_id} "
@@ -385,12 +394,38 @@ class MigrationService:
                     flush=True,
                 )
 
-                await asyncio.to_thread(
+                transfer_started = time.monotonic()
+                transfer_result = await asyncio.to_thread(
                     self._transfer.send,
                     task_id,
                     destination_node_id,
                     migration_id,
                 )
+                transfer_seconds = float(
+                    getattr(
+                        transfer_result,
+                        "duration_seconds",
+                        time.monotonic() - transfer_started,
+                    )
+                )
+                observed_transfer_bytes = int(
+                    getattr(
+                        transfer_result,
+                        "transfer_bytes",
+                        checkpoint_summary.size_bytes,
+                    )
+                )
+                if (
+                    self._telemetry_store is not None
+                    and observed_transfer_bytes > 0
+                    and transfer_seconds > 0
+                ):
+                    self._telemetry_store.record_transfer(
+                        self._local_node.id,
+                        destination_node_id,
+                        observed_transfer_bytes,
+                        transfer_seconds,
+                    )
 
                 if self._accounting_service is not None:
                     await asyncio.to_thread(
@@ -422,9 +457,12 @@ class MigrationService:
                 self._set_record_status(
                     migration_id, MigrationStatus.ACTIVATING
                 )
+                activation_started = time.monotonic()
                 response = await self._client.activate(
                     activation_request
                 )
+                activation_seconds = time.monotonic() - activation_started
+                restore_seconds = response.restore_wall_seconds or 0.0
 
                 if not response.activated:
                     raise RuntimeError(
@@ -433,6 +471,22 @@ class MigrationService:
                     )
 
                 activated = True
+                if self._telemetry_store is not None:
+                    self._telemetry_store.record_migration_calibration(
+                        source_node_id=self._local_node.id,
+                        destination_node_id=destination_node_id,
+                        checkpoint_seconds=checkpoint_seconds,
+                        transfer_seconds=transfer_seconds,
+                        restore_seconds=restore_seconds,
+                        activation_seconds=activation_seconds,
+                        total_downtime_seconds=(
+                            time.monotonic() - downtime_started
+                        ),
+                        transfer_bytes=(
+                            missing_artifact_bytes
+                            + checkpoint_summary.size_bytes
+                        ),
+                    )
                 await self._finalize_source_success(
                     task_id=task_id,
                     destination_node_id=destination_node_id,
@@ -568,6 +622,7 @@ class MigrationService:
         self,
         request: MigrationActivationRequest,
     ) -> MigrationActivationResponse:
+        activation_started = time.monotonic()
         if request.destination_node_id != self._local_node.id:
             return MigrationActivationResponse(
                 migration_id=request.migration_id,
@@ -731,10 +786,12 @@ class MigrationService:
                 accounting=request.accounting,
             )
 
+            restore_started = time.monotonic()
             runtime_state = await asyncio.to_thread(
                 self._runtime.start,
                 request.task_id,
             )
+            restore_seconds = time.monotonic() - restore_started
             runtime_started = True
 
             await self._bid_store.consume(request.bid_id)
@@ -770,6 +827,10 @@ class MigrationService:
                 generation=request.generation,
                 activated=True,
                 pid=runtime_state.pid,
+                restore_wall_seconds=restore_seconds,
+                activation_wall_seconds=(
+                    time.monotonic() - activation_started
+                ),
             )
 
         except Exception as exc:

@@ -49,6 +49,11 @@ class TaskBidContext(BaseModel):
     fallback_score: float | None = Field(default=None, ge=0)
     opportunity_loss: float = Field(default=0.0, ge=0)
 
+    effective_power_kw: float | None = Field(default=None, gt=0)
+    power_source: str | None = None
+    power_confidence: float | None = Field(default=None, ge=0, le=1)
+    telemetry_freshness: str | None = None
+
 
 class BidRequest(BaseModel):
     bid_id: str = Field(min_length=1)

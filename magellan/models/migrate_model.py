@@ -63,18 +63,26 @@ def estimate_migrate(
         latency_ms=edge.latency_ms,
     )
 
+    checkpoint_seconds = (
+        edge.checkpoint_seconds
+        if edge.checkpoint_seconds is not None
+        else pause_policy.pause_seconds
+    )
+    restore_seconds = (
+        edge.restore_seconds
+        if edge.restore_seconds is not None
+        else pause_policy.resume_seconds
+    )
+
     arrival_time = at_utc + pd.Timedelta(
         seconds=(
-            pause_policy.pause_seconds
+            checkpoint_seconds
             + transfer_duration_seconds
-            + pause_policy.resume_seconds
+            + restore_seconds
         )
     )
 
-    source_overhead_seconds = (
-        pause_policy.pause_seconds
-        + pause_policy.resume_seconds
-    )
+    source_overhead_seconds = checkpoint_seconds + restore_seconds
 
     source_intensity = carbon_store.average(
         source.id,
@@ -131,9 +139,9 @@ def estimate_migrate(
     )
 
     total_time_seconds = (
-        pause_policy.pause_seconds
+        checkpoint_seconds
         + transfer_duration_seconds
-        + pause_policy.resume_seconds
+        + restore_seconds
         + compute_seconds
     )
 
@@ -155,6 +163,11 @@ def estimate_migrate(
             "distance_km": edge.distance_km,
             "bandwidth_mbps": edge.bandwidth_mbps,
             "latency_ms": edge.latency_ms,
+            "bandwidth_source": edge.bandwidth_source,
+            "latency_source": edge.latency_source,
+            "checkpoint_seconds": checkpoint_seconds,
+            "restore_seconds": restore_seconds,
+            "calibration_source": edge.calibration_source,
             "checkpoint_bytes": task.checkpoint_bytes,
             "static_data_bytes": static_data_bytes,
             "total_transfer_bytes": total_transfer_bytes,

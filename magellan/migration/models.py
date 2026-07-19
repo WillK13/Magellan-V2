@@ -75,6 +75,8 @@ class MigrationActivationResponse(BaseModel):
     activated: bool
     pid: int | None = None
     error: str | None = None
+    restore_wall_seconds: float | None = Field(default=None, ge=0)
+    activation_wall_seconds: float | None = Field(default=None, ge=0)
 
 
 class OwnershipUpdate(BaseModel):
