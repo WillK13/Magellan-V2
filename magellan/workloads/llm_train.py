@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -257,12 +258,36 @@ def parse_args() -> argparse.Namespace:
         "--dataset-file",
         default=None,
     )
+    parser.add_argument(
+        "--completion-file",
+        default=None,
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+    )
 
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    if (args.completion_file is None) != (args.output_dir is None):
+        raise ValueError(
+            "--completion-file and --output-dir must be supplied together"
+        )
+
+    completion_file = (
+        Path(args.completion_file).resolve()
+        if args.completion_file is not None
+        else None
+    )
+    output_directory = (
+        Path(args.output_dir).resolve()
+        if args.output_dir is not None
+        else None
+    )
 
     training_text = args.text
 
@@ -485,12 +510,71 @@ def main() -> None:
         loss_value=last_loss,
     )
 
-    print(
-        f"[LLM] stopped completed_steps="
-        f"{completed_steps} "
-        f"node={os.getenv('MAGELLAN_NODE_ID')}",
-        flush=True,
+    natural_completion = (
+        not stop_requested
+        and completed_steps >= args.max_steps
     )
+
+    if natural_completion:
+        assert completion_file is not None
+        assert output_directory is not None
+        output_directory.mkdir(parents=True, exist_ok=True)
+        completed_at = datetime.now(timezone.utc)
+
+        atomic_json_write(
+            output_directory / "training-summary.json",
+            {
+                "task_id": os.getenv(
+                    "MAGELLAN_TASK_ID",
+                    "unknown",
+                ),
+                "completed_steps": completed_steps,
+                "loss": last_loss,
+                "model": args.model,
+                "device": str(device),
+                "node_id": os.getenv(
+                    "MAGELLAN_NODE_ID",
+                    "unknown",
+                ),
+                "completed_at_utc": completed_at.isoformat(),
+            },
+        )
+
+        # Written last: this marker commits successful completion.
+        atomic_json_write(
+            completion_file,
+            {
+                "format_version": 1,
+                "task_id": os.getenv(
+                    "MAGELLAN_TASK_ID",
+                    "unknown",
+                ),
+                "success": True,
+                "completed_at_utc": completed_at.isoformat(),
+                "details": {
+                    "completed_steps": completed_steps,
+                    "loss": last_loss,
+                    "node_id": os.getenv(
+                        "MAGELLAN_NODE_ID",
+                        "unknown",
+                    ),
+                },
+            },
+        )
+
+        print(
+            f"[LLM] completed completed_steps="
+            f"{completed_steps} "
+            f"node={os.getenv('MAGELLAN_NODE_ID')}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[LLM] stopped completed_steps="
+            f"{completed_steps} "
+            f"node={os.getenv('MAGELLAN_NODE_ID')}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

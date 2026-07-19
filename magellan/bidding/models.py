@@ -11,7 +11,11 @@ from magellan.models.types import ActionType, ScoredAction
 class BidStatus(str, Enum):
     PENDING = "pending"
     ACCEPTED = "accepted"
+    ACTIVATING = "activating"
+    CONSUMED = "consumed"
     REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
 
 
 class BidRequest(BaseModel):
@@ -32,10 +36,7 @@ class BidRequest(BaseModel):
                 "A bid candidate must represent a migrate action"
             )
 
-        if (
-            self.candidate.source_node_id
-            != self.source_node_id
-        ):
+        if self.candidate.source_node_id != self.source_node_id:
             raise ValueError(
                 "Candidate source does not match bid source"
             )
@@ -56,3 +57,7 @@ class BidRecord(BidRequest):
     received_at_utc: datetime
     decided_at_utc: datetime | None = None
     decision_reason: str | None = None
+
+    reservation_expires_at_utc: datetime | None = None
+    activation_started_at_utc: datetime | None = None
+    consumed_at_utc: datetime | None = None

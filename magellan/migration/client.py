@@ -12,6 +12,10 @@ from magellan.migration.models import (
 )
 
 
+class ActivationOutcomeUnknownError(RuntimeError):
+    pass
+
+
 class MigrationClient:
     def __init__(
         self,
@@ -68,8 +72,8 @@ class MigrationClient:
                 if attempt < 3:
                     await asyncio.sleep(1.0)
 
-        raise RuntimeError(
-            "Destination activation failed after retries: "
+        raise ActivationOutcomeUnknownError(
+            "Destination activation outcome is unknown after retries: "
             f"{last_error}"
         )
 

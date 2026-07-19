@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 from magellan.api.peer_client import check_all_peers
 from magellan.bidding.models import (
@@ -43,6 +44,10 @@ async def lifespan(_: FastAPI):
             context.scheduler_service.run(stop_event),
             name="magellan-scheduler",
         ),
+        asyncio.create_task(
+            context.recovery_service.run(stop_event),
+            name="magellan-recovery",
+        ),
     ]
 
     print(
@@ -73,7 +78,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -81,6 +86,9 @@ app = FastAPI(
 @app.get("/health")
 async def health() -> dict:
     records = await context.bid_store.list_records()
+    active_reservations = (
+        await context.bid_store.active_reservation_count()
+    )
 
     return {
         "status": "ok",
@@ -97,6 +105,11 @@ async def health() -> dict:
         "pending_bid_count": sum(
             record.status == BidStatus.PENDING
             for record in records
+        ),
+        "active_reservation_count": active_reservations,
+        "completed_task_count": sum(
+            item["state"]["status"] == "completed"
+            for item in context.registry.summaries()
         ),
         "timestamp_utc": datetime.now(
             timezone.utc
@@ -204,6 +217,46 @@ async def get_bid(bid_id: str) -> BidRecord:
 
     return record
 
+
+@app.post(
+    "/bids/{bid_id}/renew",
+    response_model=BidRecord,
+)
+async def renew_bid(bid_id: str) -> BidRecord:
+    try:
+        return await context.bid_store.renew(bid_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+
+@app.post(
+    "/bids/{bid_id}/cancel",
+    response_model=BidRecord,
+)
+async def cancel_bid(
+    bid_id: str,
+    reason: str = "Source cancelled reservation",
+) -> BidRecord:
+    try:
+        return await context.bid_store.cancel(
+            bid_id,
+            reason=reason,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+
 @app.post("/tasks/{task_id}/start")
 async def start_task(task_id: str) -> dict:
     try:
@@ -218,6 +271,30 @@ async def start_task(task_id: str) -> dict:
         ) from exc
 
     return state.model_dump(mode="json")
+
+
+@app.post(
+    "/tasks/{task_id}/migrate/{destination_node_id}"
+)
+async def migrate_task(
+    task_id: str,
+    destination_node_id: str,
+) -> dict:
+    try:
+        return await context.scheduler_service.request_migration(
+            task_id=task_id,
+            destination_node_id=destination_node_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
 
 @app.post("/tasks/{task_id}/stop")
@@ -258,6 +335,12 @@ async def ownership_update(
             owner_node_id=update.owner_node_id,
             generation=update.generation,
             migration_at_utc=update.migration_at_utc,
+            status=update.status,
+            completed_at_utc=update.completed_at_utc,
+            final_output_manifest_sha256=(
+                update.final_output_manifest_sha256
+            ),
+            final_output_bytes=update.final_output_bytes,
         )
 
         if update.artifact_digests:
@@ -277,6 +360,77 @@ async def ownership_update(
         "owner_node_id": update.owner_node_id,
         "generation": update.generation,
     }
+
+@app.get("/tasks/{task_id}/outputs")
+async def task_outputs(task_id: str) -> dict:
+    try:
+        state = context.registry.get_state(task_id)
+
+        if state.owner_node_id != context.local_node.id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Final outputs are owned by "
+                    f"{state.owner_node_id}"
+                ),
+            )
+
+        manifest = context.completion_manager.load_manifest(
+            task_id
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    return manifest.model_dump(mode="json")
+
+
+@app.get("/tasks/{task_id}/outputs/{relative_path:path}")
+async def task_output_file(
+    task_id: str,
+    relative_path: str,
+):
+    try:
+        state = context.registry.get_state(task_id)
+
+        if state.owner_node_id != context.local_node.id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Final outputs are owned by "
+                    f"{state.owner_node_id}"
+                ),
+            )
+
+        path = context.completion_manager.resolve_output_file(
+            task_id,
+            relative_path,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    return FileResponse(path)
+
 
 @app.post(
     "/artifacts/status",

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, IPvAnyAddress
+from pydantic import (
+    BaseModel,
+    Field,
+    IPvAnyAddress,
+    model_validator,
+)
 
 
 class NetworkEdgeConfig(BaseModel):
@@ -39,11 +44,33 @@ class ClusterConfig(BaseModel):
     bid_window_seconds: int = Field(default=10, ge=1)
     request_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    reservation_ttl_seconds: float = Field(
+        default=180.0,
+        gt=0,
+    )
+    reservation_renew_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+    )
+
     default_bandwidth_mbps: float = Field(default=100.0, gt=0)
     default_latency_ms: float = Field(default=50.0, ge=0)
 
     nodes: list[NodeConfig]
     edges: list[NetworkEdgeConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_reservation_policy(self) -> "ClusterConfig":
+        if (
+            self.reservation_renew_interval_seconds
+            >= self.reservation_ttl_seconds
+        ):
+            raise ValueError(
+                "reservation_renew_interval_seconds must be less "
+                "than reservation_ttl_seconds"
+            )
+
+        return self
 
     def get_node(self, node_id: str) -> NodeConfig:
         for node in self.nodes:

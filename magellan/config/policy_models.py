@@ -44,6 +44,14 @@ class MigrationPolicy(BaseModel):
         gt=0,
     )
 
+class RecoveryPolicy(BaseModel):
+    enabled: bool = True
+    max_restart_attempts: int = Field(default=3, ge=0)
+    initial_backoff_seconds: float = Field(default=5.0, ge=0)
+    max_backoff_seconds: float = Field(default=60.0, ge=0)
+    scan_interval_seconds: float = Field(default=1.0, gt=0)
+
+
 class ClockPolicy(BaseModel):
     mode: Literal["wall", "trace"]
     trace_start_utc: str | None = None
@@ -55,4 +63,5 @@ class ScoringPolicy(BaseModel):
     weights: ObjectiveWeights
     pause: PausePolicy
     migration: MigrationPolicy
+    recovery: RecoveryPolicy = Field(default_factory=RecoveryPolicy)
     clock: ClockPolicy

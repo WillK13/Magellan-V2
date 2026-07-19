@@ -36,6 +36,8 @@ from magellan.state.persistent_registry import (
 )
 
 from magellan.runtime.checkpoint import CheckpointManager
+from magellan.runtime.completion import CompletionManager
+from magellan.runtime.recovery import FailureRecoveryService
 
 from magellan.artifacts.client import ArtifactClient
 from magellan.artifacts.manager import ArtifactManager
@@ -67,6 +69,8 @@ class DaemonContext:
     migration_service: MigrationService
     scheduler_service: SchedulerService
     checkpoint_manager: CheckpointManager
+    completion_manager: CompletionManager
+    recovery_service: FailureRecoveryService
     artifact_manager: ArtifactManager
     artifact_client: ArtifactClient
     prefetch_service: ArtifactPrefetchService
@@ -177,11 +181,16 @@ def build_daemon_context() -> DaemonContext:
 
     clock = MagellanClock(policy.clock)
 
+    completion_manager = CompletionManager(
+        registry=registry,
+    )
+
     runtime = LocalProcessRuntime(
         registry=registry,
         local_node_id=local_node.id,
         repository_root=repository_root,
         artifact_manager=artifact_manager,
+        completion_manager=completion_manager,
     )
     checkpoint_manager = CheckpointManager(
         registry=registry,
@@ -189,7 +198,11 @@ def build_daemon_context() -> DaemonContext:
 
     runtime.reconcile()
 
-    bid_store = BidStore()
+    bid_store = BidStore(
+        reservation_ttl_seconds=(
+            cluster.reservation_ttl_seconds
+        )
+    )
     bid_client = BidClient(cluster)
 
     bid_arbiter = BidArbiter(
@@ -207,6 +220,11 @@ def build_daemon_context() -> DaemonContext:
         remote_state_root=remote_state_root,
     )
 
+    broadcaster = OwnershipBroadcaster(
+        cluster=cluster,
+        local_node_id=local_node.id,
+    )
+
     migration_service = MigrationService(
         local_node=local_node,
         cluster=cluster,
@@ -216,16 +234,23 @@ def build_daemon_context() -> DaemonContext:
         artifact_manager=artifact_manager,
         prefetch_service=prefetch_service,
         checkpoint_manager=checkpoint_manager,
+        bid_client=bid_client,
+        bid_store=bid_store,
         client=MigrationClient(
             cluster=cluster,
             activation_timeout_seconds=(
                 policy.migration.activation_timeout_seconds
             ),
         ),
-        broadcaster=OwnershipBroadcaster(
-            cluster=cluster,
-            local_node_id=local_node.id,
-        ),
+        broadcaster=broadcaster,
+    )
+
+    recovery_service = FailureRecoveryService(
+        local_node_id=local_node.id,
+        policy=policy.recovery,
+        registry=registry,
+        runtime=runtime,
+        checkpoint_manager=checkpoint_manager,
     )
 
     scheduler_service = SchedulerService(
@@ -241,6 +266,7 @@ def build_daemon_context() -> DaemonContext:
         migration_service=migration_service,
         checkpoint_manager=checkpoint_manager,
         prefetch_service=prefetch_service,
+        broadcaster=broadcaster,
     )
 
     return DaemonContext(
@@ -258,6 +284,8 @@ def build_daemon_context() -> DaemonContext:
         migration_service=migration_service,
         scheduler_service=scheduler_service,
         checkpoint_manager=checkpoint_manager,
+        completion_manager=completion_manager,
+        recovery_service=recovery_service,
         artifact_manager=artifact_manager,
         prefetch_service=prefetch_service,
         artifact_client=artifact_client,

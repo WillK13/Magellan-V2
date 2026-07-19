@@ -1,6 +1,6 @@
 {
   "profile": {
-    "task_id": "counter-001",
+    "task_id": "counter-recovery-001",
     "workload_type": "counter",
     "current_node_id": "boston",
     "power_kw": 0.1,

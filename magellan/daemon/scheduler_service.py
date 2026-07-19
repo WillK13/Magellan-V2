@@ -17,6 +17,8 @@ from magellan.config.models import (
 )
 from magellan.config.policy_models import ScoringPolicy
 from magellan.graph.topology import ClusterGraph
+from magellan.migration.client import OwnershipBroadcaster
+from magellan.migration.models import OwnershipUpdate
 from magellan.migration.service import MigrationService
 from magellan.models.types import ActionType
 from magellan.runtime.clock import MagellanClock
@@ -27,6 +29,7 @@ from magellan.scheduler.scoring import evaluate_task
 from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
+from magellan.state.task_models import TaskStatus
 
 from magellan.runtime.checkpoint import (
     CheckpointManager,
@@ -53,6 +56,7 @@ class SchedulerService:
         migration_service: MigrationService,
         checkpoint_manager: CheckpointManager,
         prefetch_service: ArtifactPrefetchService,
+        broadcaster: OwnershipBroadcaster,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -66,6 +70,8 @@ class SchedulerService:
         self._migration_service = migration_service
         self._checkpoint_manager = checkpoint_manager
         self._prefetch_service = prefetch_service
+        self._broadcaster = broadcaster
+        self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
 
     async def _evaluate_task(
         self,
@@ -216,12 +222,157 @@ class SchedulerService:
                     selected.destination_node_id
                 ),
                 migration_at_utc=trace_time.to_pydatetime(),
+                bid_id=result.bid_id,
+            )
+
+    async def request_migration(
+        self,
+        task_id: str,
+        destination_node_id: str,
+    ) -> dict:
+        """Operator-triggered migration that still uses scoring and bidding."""
+        state = self._registry.get_state(task_id)
+
+        if state.owner_node_id != self._local_node.id:
+            raise RuntimeError(
+                f"Cannot migrate {task_id}; owner is "
+                f"{state.owner_node_id}"
+            )
+
+        if state.status != TaskStatus.RUNNING:
+            raise RuntimeError(
+                f"Cannot migrate {task_id}; status is "
+                f"{state.status.value}"
+            )
+
+        self._cluster.get_node(destination_node_id)
+
+        if destination_node_id == self._local_node.id:
+            raise ValueError(
+                "Destination must differ from the local node"
+            )
+
+        checkpoint_summary = await asyncio.to_thread(
+            self._checkpoint_manager.validate,
+            task_id,
+        )
+        task = self._registry.scoring_profile(
+            task_id,
+            checkpoint_bytes=checkpoint_summary.size_bytes,
+        )
+        missing_bytes = await self._prefetch_service.missing_bytes(
+            task_id=task_id,
+            destination_node_id=destination_node_id,
+        )
+        trace_time = self._clock.now()
+        decision = evaluate_task(
+            task=task,
+            cluster=self._cluster,
+            policy=self._policy,
+            graph=self._graph,
+            carbon_store=self._carbon_store,
+            at_utc=trace_time,
+            static_data_bytes_by_destination={
+                destination_node_id: missing_bytes,
+            },
+        )
+
+        candidate = next(
+            (
+                action
+                for action in decision.ranked_actions
+                if (
+                    action.action == ActionType.MIGRATE
+                    and action.destination_node_id
+                    == destination_node_id
+                )
+            ),
+            None,
+        )
+
+        if candidate is None:
+            raise RuntimeError(
+                f"No feasible migration candidate for "
+                f"{task_id} -> {destination_node_id}"
+            )
+
+        bid = BidRequest(
+            bid_id=str(uuid4()),
+            epoch_id=(
+                f"operator:{task_id}:"
+                f"{int(trace_time.timestamp())}"
+            ),
+            task_id=task_id,
+            source_node_id=self._local_node.id,
+            destination_node_id=destination_node_id,
+            candidate=candidate,
+            submitted_at_utc=datetime.now(timezone.utc),
+        )
+        result = await self._bid_client.submit_and_wait(bid)
+
+        if result.status != BidStatus.ACCEPTED:
+            return {
+                "bid": result.model_dump(mode="json"),
+                "migrated": False,
+            }
+
+        migrated = await self._migration_service.migrate(
+            task_id=task_id,
+            destination_node_id=destination_node_id,
+            migration_at_utc=trace_time.to_pydatetime(),
+            bid_id=result.bid_id,
+        )
+
+        return {
+            "bid": result.model_dump(mode="json"),
+            "migrated": migrated,
+            "state": self._registry.get_state(
+                task_id
+            ).model_dump(mode="json"),
+        }
+
+    async def _broadcast_completed_states(self) -> None:
+        for state in self._registry.all_states():
+            if (
+                state.owner_node_id != self._local_node.id
+                or state.status != TaskStatus.COMPLETED
+            ):
+                continue
+
+            key = (
+                state.task_id,
+                state.generation,
+                state.final_output_manifest_sha256,
+            )
+
+            if key in self._broadcasted_completions:
+                continue
+
+            await self._broadcaster.broadcast(
+                OwnershipUpdate(
+                    task_id=state.task_id,
+                    owner_node_id=state.owner_node_id,
+                    generation=state.generation,
+                    status=TaskStatus.COMPLETED,
+                    completed_at_utc=state.completed_at_utc,
+                    final_output_manifest_sha256=(
+                        state.final_output_manifest_sha256
+                    ),
+                    final_output_bytes=state.final_output_bytes,
+                )
+            )
+            self._broadcasted_completions.add(key)
+
+            print(
+                f"[completion-broadcast] task={state.task_id} "
+                f"owner={state.owner_node_id} "
+                f"generation={state.generation}",
+                flush=True,
             )
 
     async def run_epoch(self) -> None:
-        await asyncio.to_thread(
-            self._runtime.reconcile
-        )
+        await asyncio.to_thread(self._runtime.reconcile)
+        await self._broadcast_completed_states()
 
         task_ids = self._registry.running_owned_task_ids(
             self._local_node.id

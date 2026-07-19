@@ -5,10 +5,12 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from magellan.artifacts.models import ArtifactBinding
+from magellan.state.task_models import TaskStatus
 
 
 class MigrationActivationRequest(BaseModel):
     migration_id: str = Field(min_length=1)
+    bid_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
 
     source_node_id: str = Field(min_length=1)
@@ -41,3 +43,8 @@ class OwnershipUpdate(BaseModel):
     artifact_digests: dict[str, str] = Field(
         default_factory=dict
     )
+
+    status: TaskStatus | None = None
+    completed_at_utc: datetime | None = None
+    final_output_manifest_sha256: str | None = None
+    final_output_bytes: int | None = Field(default=None, ge=0)

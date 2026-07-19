@@ -5,8 +5,14 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
+from magellan.artifacts.manager import ArtifactManager
+from magellan.runtime.completion import (
+    CompletionManager,
+    CompletionValidationError,
+)
 from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
@@ -15,7 +21,6 @@ from magellan.state.task_models import (
     TaskStatus,
 )
 
-from magellan.artifacts.manager import ArtifactManager
 
 def pid_is_alive(pid: int) -> bool:
     try:
@@ -27,6 +32,14 @@ def pid_is_alive(pid: int) -> bool:
         return True
 
 
+@dataclass(frozen=True)
+class RuntimeReconcileEvent:
+    task_id: str
+    status: TaskStatus
+    exit_code: int | None
+    error: str | None = None
+
+
 class LocalProcessRuntime:
     def __init__(
         self,
@@ -34,18 +47,23 @@ class LocalProcessRuntime:
         local_node_id: str,
         repository_root: str | Path,
         artifact_manager: ArtifactManager,
+        completion_manager: CompletionManager,
     ) -> None:
         self._registry = registry
         self._local_node_id = local_node_id
         self._repository_root = Path(repository_root).resolve()
         self._processes: dict[str, subprocess.Popen] = {}
         self._artifact_manager = artifact_manager
+        self._completion_manager = completion_manager
 
     def _render_argument(
         self,
         task_id: str,
         value: str,
     ) -> str:
+        completion_file = self._registry.completion_file(task_id)
+        output_directory = self._registry.output_directory(task_id)
+
         return value.format(
             task_id=task_id,
             checkpoint_file=str(
@@ -61,12 +79,20 @@ class LocalProcessRuntime:
             artifacts_directory=str(
                 self._registry.artifacts_directory(task_id)
             ),
+            completion_file=(
+                str(completion_file)
+                if completion_file is not None
+                else ""
+            ),
+            output_directory=(
+                str(output_directory)
+                if output_directory is not None
+                else ""
+            ),
         )
 
     def start(self, task_id: str) -> TaskRuntimeState:
-        self._artifact_manager.ensure_task_artifacts(
-            task_id
-        )
+        self._artifact_manager.ensure_task_artifacts(task_id)
         definition = self._registry.get_definition(task_id)
         state = self._registry.get_state(task_id)
 
@@ -74,6 +100,11 @@ class LocalProcessRuntime:
             raise RuntimeError(
                 f"Cannot start {task_id}; owner is "
                 f"{state.owner_node_id}"
+            )
+
+        if state.status == TaskStatus.COMPLETED:
+            raise RuntimeError(
+                f"Cannot start completed task {task_id}"
             )
 
         if (
@@ -85,13 +116,15 @@ class LocalProcessRuntime:
 
         task_directory = self._registry.task_directory(task_id)
         checkpoint_file = self._registry.checkpoint_file(task_id)
-
         task_directory.mkdir(parents=True, exist_ok=True)
         checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
 
+        output_directory = self._registry.output_directory(task_id)
+        if output_directory is not None:
+            output_directory.mkdir(parents=True, exist_ok=True)
+
         logs_directory = task_directory / "logs"
         logs_directory.mkdir(parents=True, exist_ok=True)
-
         log_path = logs_directory / "process.log"
 
         arguments = [
@@ -120,11 +153,15 @@ class LocalProcessRuntime:
         readiness_file = self._registry.readiness_file(task_id)
 
         if readiness_file is not None:
-            readiness_file.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+            readiness_file.parent.mkdir(parents=True, exist_ok=True)
             readiness_file.unlink(missing_ok=True)
+
+        # A completion marker belongs to exactly one successful run. Failed
+        # or interrupted runs never create it, and retries begin cleanly.
+        completion_file = self._registry.completion_file(task_id)
+        if completion_file is not None:
+            completion_file.parent.mkdir(parents=True, exist_ok=True)
+            completion_file.unlink(missing_ok=True)
 
         log_file = log_path.open("a", encoding="utf-8")
 
@@ -152,11 +189,14 @@ class LocalProcessRuntime:
                 pass
 
             error = f"{type(exc).__name__}: {exc}"
-            self._registry.mark_failed(task_id, error)
+            self._registry.mark_failed(
+                task_id,
+                error,
+                exit_code=process.poll(),
+            )
             raise RuntimeError(error) from exc
 
         self._processes[task_id] = process
-
         state = self._registry.mark_running(
             task_id=task_id,
             pid=process.pid,
@@ -173,6 +213,9 @@ class LocalProcessRuntime:
     def stop(self, task_id: str) -> TaskRuntimeState:
         definition = self._registry.get_definition(task_id)
         state = self._registry.get_state(task_id)
+
+        if state.status == TaskStatus.COMPLETED:
+            return state
 
         if state.pid is None:
             return self._registry.mark_stopped(task_id)
@@ -209,7 +252,6 @@ class LocalProcessRuntime:
                 pass
 
         self._processes.pop(task_id, None)
-
         state = self._registry.mark_stopped(task_id)
 
         print(
@@ -220,7 +262,9 @@ class LocalProcessRuntime:
 
         return state
 
-    def reconcile(self) -> None:
+    def reconcile(self) -> list[RuntimeReconcileEvent]:
+        events: list[RuntimeReconcileEvent] = []
+
         for state in self._registry.all_states():
             if (
                 state.owner_node_id != self._local_node_id
@@ -228,11 +272,88 @@ class LocalProcessRuntime:
             ):
                 continue
 
-            if state.pid is None or not pid_is_alive(state.pid):
-                self._registry.mark_failed(
-                    state.task_id,
-                    "Persisted process is no longer running",
+            process = self._processes.get(state.task_id)
+            exit_code = (
+                process.poll()
+                if process is not None
+                else None
+            )
+
+            alive = (
+                exit_code is None
+                and state.pid is not None
+                and pid_is_alive(state.pid)
+            )
+
+            if alive:
+                continue
+
+            self._processes.pop(state.task_id, None)
+
+            if self._completion_manager.completion_marker_exists(
+                state.task_id
+            ):
+                try:
+                    manifest = self._completion_manager.finalize(
+                        task_id=state.task_id,
+                        exit_code=exit_code,
+                    )
+                except Exception as exc:
+                    error = (
+                        "Completion validation failed: "
+                        f"{exc}"
+                    )
+                    self._registry.mark_failed(
+                        state.task_id,
+                        error,
+                        exit_code=exit_code,
+                    )
+                    events.append(
+                        RuntimeReconcileEvent(
+                            task_id=state.task_id,
+                            status=TaskStatus.FAILED,
+                            exit_code=exit_code,
+                            error=error,
+                        )
+                    )
+                    continue
+
+                print(
+                    f"[runtime-complete] task={state.task_id} "
+                    f"files={len(manifest.files)} "
+                    f"bytes={manifest.total_size_bytes}",
+                    flush=True,
                 )
+
+                events.append(
+                    RuntimeReconcileEvent(
+                        task_id=state.task_id,
+                        status=TaskStatus.COMPLETED,
+                        exit_code=exit_code,
+                    )
+                )
+                continue
+
+            error = (
+                "Persisted process is no longer running "
+                "and no valid completion marker was written"
+            )
+            self._registry.mark_failed(
+                state.task_id,
+                error,
+                exit_code=exit_code,
+            )
+            events.append(
+                RuntimeReconcileEvent(
+                    task_id=state.task_id,
+                    status=TaskStatus.FAILED,
+                    exit_code=exit_code,
+                    error=error,
+                )
+            )
+
+        return events
+
     def _wait_for_readiness(
         self,
         task_id: str,
@@ -258,14 +379,14 @@ class LocalProcessRuntime:
         )
 
         while time.monotonic() < deadline:
+            if readiness_file.is_file():
+                return
+
             if process.poll() is not None:
                 raise RuntimeError(
                     f"Task {task_id} exited before becoming ready "
                     f"with code {process.returncode}"
                 )
-
-            if readiness_file.is_file():
-                return
 
             time.sleep(0.25)
 

@@ -35,7 +35,11 @@
       "--device",
       "cpu",
       "--torch-threads",
-      "2"
+      "2",
+      "--completion-file",
+      "{completion_file}",
+      "--output-dir",
+      "{output_directory}"
     ],
     "environment": {
       "TOKENIZERS_PARALLELISM": "false"
@@ -45,7 +49,9 @@
     "checkpoint_manifest_relative_path": "complete.json",
     "readiness_relative_path": "runtime/ready.json",
     "readiness_timeout_seconds": 600,
-    "stop_timeout_seconds": 120
+    "stop_timeout_seconds": 120,
+    "completion_relative_path": "runtime/completion.json",
+    "output_relative_directory": "output"
   },
   "artifacts": [
     {

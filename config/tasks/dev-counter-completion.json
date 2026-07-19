@@ -1,6 +1,6 @@
 {
   "profile": {
-    "task_id": "counter-001",
+    "task_id": "counter-complete-001",
     "workload_type": "counter",
     "current_node_id": "boston",
     "power_kw": 0.1,
@@ -10,7 +10,7 @@
       "boston",
       "virginia"
     ],
-    "estimated_remaining_seconds": 86400,
+    "estimated_remaining_seconds": 60,
     "accumulated_cost_usd": 0,
     "cost_cap_usd": null,
     "last_migration_at": null
@@ -21,7 +21,9 @@
       "--checkpoint-file",
       "{checkpoint_file}",
       "--interval-seconds",
-      "1",
+      "0.25",
+      "--max-value",
+      "80",
       "--completion-file",
       "{completion_file}",
       "--output-dir",
@@ -30,8 +32,8 @@
     "environment": {},
     "working_directory": ".",
     "checkpoint_relative_path": "checkpoint/counter.json",
-    "stop_timeout_seconds": 10,
     "completion_relative_path": "runtime/completion.json",
-    "output_relative_directory": "output"
+    "output_relative_directory": "output",
+    "stop_timeout_seconds": 10
   }
 }
