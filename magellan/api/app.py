@@ -18,8 +18,11 @@ from magellan.daemon.context import build_daemon_context
 from magellan.migration.models import (
     MigrationActivationRequest,
     MigrationActivationResponse,
+    MigrationRecord,
     OwnershipUpdate,
 )
+
+from magellan.reconciliation.models import OwnershipSnapshot
 
 from magellan.artifacts.models import (
     ArtifactCommitRequest,
@@ -56,6 +59,10 @@ async def lifespan(_: FastAPI):
             context.accounting_service.run(stop_event),
             name="magellan-accounting",
         ),
+        asyncio.create_task(
+            context.reconciliation_service.run(stop_event),
+            name="magellan-reconciliation",
+        ),
     ]
 
     print(
@@ -86,7 +93,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.4.2",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -122,6 +129,15 @@ async def health() -> dict:
         "paused_task_count": sum(
             item["state"]["status"] == "paused"
             for item in context.registry.summaries()
+        ),
+        "migration_record_count": len(
+            context.migration_journal.list_records()
+        ),
+        "last_reconciliation_at_utc": (
+            context.reconciliation_service.last_completed_at_utc
+        ),
+        "last_reconciliation_updates": (
+            context.reconciliation_service.last_applied_updates
         ),
         "timestamp_utc": datetime.now(
             timezone.utc
@@ -381,6 +397,36 @@ async def activate_migration(
     )
 
 
+@app.get("/migrations", response_model=list[MigrationRecord])
+async def list_migrations() -> list[MigrationRecord]:
+    return context.migration_journal.list_records()
+
+
+@app.get(
+    "/migrations/{migration_id}",
+    response_model=MigrationRecord,
+)
+async def get_migration(migration_id: str) -> MigrationRecord:
+    record = context.migration_journal.get(migration_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown migration: {migration_id}",
+        )
+    return record
+
+
+@app.get(
+    "/ownership/snapshot",
+    response_model=OwnershipSnapshot,
+)
+async def ownership_snapshot() -> OwnershipSnapshot:
+    return OwnershipSnapshot(
+        reporting_node_id=context.local_node.id,
+        updates=context.registry.ownership_updates(),
+    )
+
+
 @app.post("/ownership")
 async def ownership_update(
     update: OwnershipUpdate,
@@ -390,6 +436,7 @@ async def ownership_update(
             task_id=update.task_id,
             owner_node_id=update.owner_node_id,
             generation=update.generation,
+            migration_id=update.last_migration_id,
             migration_at_utc=update.migration_at_utc,
             status=update.status,
             completed_at_utc=update.completed_at_utc,

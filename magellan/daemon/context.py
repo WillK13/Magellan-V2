@@ -23,6 +23,7 @@ from magellan.migration.client import (
     MigrationClient,
     OwnershipBroadcaster,
 )
+from magellan.migration.journal import MigrationJournal
 from magellan.migration.service import MigrationService
 from magellan.migration.transfer import (
     RsyncCheckpointTransfer,
@@ -40,6 +41,10 @@ from magellan.runtime.checkpoint import CheckpointManager
 from magellan.runtime.completion import CompletionManager
 from magellan.runtime.pause import PauseService
 from magellan.runtime.recovery import FailureRecoveryService
+from magellan.reconciliation.client import ReconciliationClient
+from magellan.reconciliation.service import (
+    DistributedReconciliationService,
+)
 
 from magellan.artifacts.client import ArtifactClient
 from magellan.artifacts.manager import ArtifactManager
@@ -78,6 +83,8 @@ class DaemonContext:
     artifact_manager: ArtifactManager
     artifact_client: ArtifactClient
     prefetch_service: ArtifactPrefetchService
+    migration_journal: MigrationJournal
+    reconciliation_service: DistributedReconciliationService
 
 
 def _task_files() -> list[Path]:
@@ -224,7 +231,8 @@ def build_daemon_context() -> DaemonContext:
     bid_store = BidStore(
         reservation_ttl_seconds=(
             cluster.reservation_ttl_seconds
-        )
+        ),
+        state_file=state_root / "control" / "bids.json",
     )
     bid_client = BidClient(cluster)
 
@@ -248,6 +256,8 @@ def build_daemon_context() -> DaemonContext:
         local_node_id=local_node.id,
     )
 
+    migration_journal = MigrationJournal(state_root)
+
     migration_service = MigrationService(
         local_node=local_node,
         cluster=cluster,
@@ -260,6 +270,8 @@ def build_daemon_context() -> DaemonContext:
         bid_client=bid_client,
         bid_store=bid_store,
         accounting_service=accounting_service,
+        journal=migration_journal,
+        reconciliation_policy=policy.reconciliation,
         client=MigrationClient(
             cluster=cluster,
             activation_timeout_seconds=(
@@ -295,6 +307,17 @@ def build_daemon_context() -> DaemonContext:
         accounting_service=accounting_service,
     )
 
+    reconciliation_service = DistributedReconciliationService(
+        local_node_id=local_node.id,
+        policy=policy.reconciliation,
+        registry=registry,
+        client=ReconciliationClient(
+            cluster=cluster,
+            local_node_id=local_node.id,
+        ),
+        migration_service=migration_service,
+    )
+
     return DaemonContext(
         cluster=cluster,
         policy=policy,
@@ -317,4 +340,6 @@ def build_daemon_context() -> DaemonContext:
         artifact_manager=artifact_manager,
         prefetch_service=prefetch_service,
         artifact_client=artifact_client,
+        migration_journal=migration_journal,
+        reconciliation_service=reconciliation_service,
     )

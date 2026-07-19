@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from magellan.bidding.models import (
@@ -22,10 +25,34 @@ class BidStore:
     def __init__(
         self,
         reservation_ttl_seconds: float = 180.0,
+        state_file: str | Path | None = None,
     ) -> None:
+        self._state_file = Path(state_file) if state_file is not None else None
         self._records: dict[str, BidRecord] = {}
         self._lock = asyncio.Lock()
         self._reservation_ttl_seconds = reservation_ttl_seconds
+        self._load()
+
+    def _load(self) -> None:
+        if self._state_file is None or not self._state_file.is_file():
+            return
+        raw = json.loads(self._state_file.read_text(encoding="utf-8"))
+        records = [BidRecord.model_validate(item) for item in raw]
+        self._records = {record.bid_id: record for record in records}
+
+    def _persist_locked(self) -> None:
+        if self._state_file is None:
+            return
+        self._state_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._state_file.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                [record.model_dump(mode="json") for record in self._records.values()],
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, self._state_file)
 
     def _expire_locked(
         self,
@@ -49,6 +76,8 @@ class BidStore:
             )
             expired.append(record.model_copy(deep=True))
 
+        if expired:
+            self._persist_locked()
         return expired
 
     async def submit(
@@ -68,6 +97,7 @@ class BidStore:
             )
 
             self._records[record.bid_id] = record
+            self._persist_locked()
             return record.model_copy(deep=True)
 
     async def get(
@@ -168,6 +198,7 @@ class BidStore:
                     )
                 )
 
+            self._persist_locked()
             return record.model_copy(deep=True)
 
     async def renew(
@@ -196,6 +227,7 @@ class BidStore:
                     seconds=self._reservation_ttl_seconds
                 )
             )
+            self._persist_locked()
             return record.model_copy(deep=True)
 
     async def begin_activation(
@@ -239,6 +271,7 @@ class BidStore:
             record.decision_reason = (
                 "Reservation claimed by destination activation"
             )
+            self._persist_locked()
             return record.model_copy(deep=True)
 
     async def consume(
@@ -266,6 +299,7 @@ class BidStore:
             record.decision_reason = (
                 "Destination activation completed"
             )
+            self._persist_locked()
             return record.model_copy(deep=True)
 
     async def cancel(
@@ -294,4 +328,5 @@ class BidStore:
             record.decided_at_utc = now
             record.reservation_expires_at_utc = None
             record.decision_reason = reason
+            self._persist_locked()
             return record.model_copy(deep=True)

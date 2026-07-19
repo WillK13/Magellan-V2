@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from magellan.artifacts.manager import ArtifactManager
@@ -11,14 +11,19 @@ from magellan.artifacts.prefetch import ArtifactPrefetchService
 from magellan.bidding.client import BidClient
 from magellan.bidding.store import BidStore
 from magellan.config.models import ClusterConfig, NodeConfig
+from magellan.config.policy_models import ReconciliationPolicy
 from magellan.migration.client import (
     ActivationOutcomeUnknownError,
     MigrationClient,
     OwnershipBroadcaster,
 )
+from magellan.migration.journal import MigrationJournal
 from magellan.migration.models import (
     MigrationActivationRequest,
     MigrationActivationResponse,
+    MigrationRecord,
+    MigrationRole,
+    MigrationStatus,
     OwnershipUpdate,
 )
 from magellan.migration.transfer import RsyncCheckpointTransfer
@@ -26,6 +31,7 @@ from magellan.runtime.accounting import RuntimeAccountingService
 from magellan.runtime.checkpoint import CheckpointManager
 from magellan.runtime.local_process import LocalProcessRuntime
 from magellan.state.persistent_registry import PersistentTaskRegistry
+from magellan.state.task_models import TaskStatus
 
 
 class MigrationService:
@@ -44,6 +50,8 @@ class MigrationService:
         bid_client: BidClient,
         bid_store: BidStore,
         accounting_service: RuntimeAccountingService | None = None,
+        journal: MigrationJournal | None = None,
+        reconciliation_policy: ReconciliationPolicy | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -58,12 +66,147 @@ class MigrationService:
         self._bid_client = bid_client
         self._bid_store = bid_store
         self._accounting_service = accounting_service
+        self._journal = journal or MigrationJournal(registry.state_root)
+        self._reconciliation_policy = (
+            reconciliation_policy or ReconciliationPolicy()
+        )
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, task_id: str) -> asyncio.Lock:
         if task_id not in self._locks:
             self._locks[task_id] = asyncio.Lock()
         return self._locks[task_id]
+
+    def get_record(self, migration_id: str) -> MigrationRecord | None:
+        return self._journal.get(migration_id)
+
+    def list_records(self) -> list[MigrationRecord]:
+        return self._journal.list_records()
+
+    def _put_record(self, record: MigrationRecord) -> MigrationRecord:
+        record.updated_at_utc = datetime.now(timezone.utc)
+        return self._journal.put(record)
+
+    def _set_record_status(
+        self,
+        migration_id: str,
+        status: MigrationStatus,
+        *,
+        pid: int | None = None,
+        error: str | None = None,
+    ) -> MigrationRecord | None:
+        record = self._journal.get(migration_id)
+        if record is None:
+            return None
+        record.status = status
+        record.pid = pid
+        record.error = error
+        return self._put_record(record)
+
+    async def _query_remote_outcome(
+        self,
+        destination_node_id: str,
+        migration_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[MigrationRecord | None, bool]:
+        timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._reconciliation_policy.activation_resolution_timeout_seconds
+        )
+        deadline = time.monotonic() + timeout
+        last_record: MigrationRecord | None = None
+        destination_reached = False
+        while time.monotonic() < deadline:
+            try:
+                last_record = await self._client.status(
+                    destination_node_id, migration_id
+                )
+                destination_reached = True
+            except ActivationOutcomeUnknownError:
+                last_record = None
+
+            if last_record is not None and last_record.status in {
+                MigrationStatus.ACTIVATED,
+                MigrationStatus.ROLLED_BACK,
+            }:
+                return last_record, destination_reached
+
+            await asyncio.sleep(
+                self._reconciliation_policy.activation_resolution_poll_seconds
+            )
+        return last_record, destination_reached
+
+    async def _finalize_source_success(
+        self,
+        *,
+        task_id: str,
+        destination_node_id: str,
+        migration_id: str,
+        new_generation: int,
+        migration_at_utc: datetime,
+        artifact_bindings,
+    ) -> None:
+        self._registry.mark_remote(
+            task_id=task_id,
+            owner_node_id=destination_node_id,
+            generation=new_generation,
+            migration_id=migration_id,
+            migration_at_utc=migration_at_utc,
+        )
+        await self._broadcaster.broadcast(
+            OwnershipUpdate(
+                task_id=task_id,
+                owner_node_id=destination_node_id,
+                generation=new_generation,
+                last_migration_id=migration_id,
+                migration_at_utc=migration_at_utc,
+                artifact_digests={
+                    binding.artifact_id: binding.digest
+                    for binding in artifact_bindings
+                },
+                accounting=self._registry.accounting_snapshot(task_id),
+            )
+        )
+        self._set_record_status(
+            migration_id, MigrationStatus.ACTIVATED
+        )
+
+    async def _rollback_source_record(
+        self,
+        record: MigrationRecord,
+        reason: str,
+    ) -> None:
+        original = record.original_state
+        if original is not None:
+            restored = original.model_copy(deep=True)
+            restored.owner_node_id = self._local_node.id
+            restored.generation = max(0, record.generation - 1)
+            restored.status = TaskStatus.STOPPED
+            restored.pid = None
+            restored.last_error = reason
+            self._registry.set_state(restored)
+        else:
+            self._registry.restore_local_after_failure(
+                task_id=record.task_id,
+                generation=max(0, record.generation - 1),
+                error=reason,
+            )
+        state = self._registry.get_state(record.task_id)
+        if state.owner_node_id == self._local_node.id and state.pid is None:
+            try:
+                await asyncio.to_thread(self._runtime.start, record.task_id)
+            except Exception as exc:
+                self._registry.mark_failed(
+                    record.task_id,
+                    f"Durable migration rollback restart failed: {exc}",
+                )
+        self._set_record_status(
+            record.migration_id,
+            MigrationStatus.ROLLED_BACK,
+            error=reason,
+        )
 
     async def _reservation_heartbeat(
         self,
@@ -143,6 +286,21 @@ class MigrationService:
 
             migration_id = str(uuid4())
             new_generation = original_state.generation + 1
+            artifact_bindings = []
+            self._put_record(
+                MigrationRecord(
+                    migration_id=migration_id,
+                    bid_id=bid_id,
+                    task_id=task_id,
+                    source_node_id=self._local_node.id,
+                    destination_node_id=destination_node_id,
+                    generation=new_generation,
+                    migration_at_utc=migration_at_utc,
+                    role=MigrationRole.SOURCE,
+                    status=MigrationStatus.PREPARING,
+                    original_state=original_state,
+                )
+            )
             heartbeat_stop = asyncio.Event()
             heartbeat_task = asyncio.create_task(
                 self._reservation_heartbeat(
@@ -172,10 +330,16 @@ class MigrationService:
                         )
                     )
                 except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    self._set_record_status(
+                        migration_id,
+                        MigrationStatus.ROLLED_BACK,
+                        error=error,
+                    )
                     print(
                         f"[prefetch-failed] task={task_id} "
                         f"destination={destination_node_id} "
-                        f"error={type(exc).__name__}: {exc}",
+                        f"error={error}",
                         flush=True,
                     )
                     return False
@@ -189,6 +353,9 @@ class MigrationService:
                 self._registry.mark_migrating(
                     task_id,
                     migration_id,
+                )
+                self._set_record_status(
+                    migration_id, MigrationStatus.TRANSFERRING
                 )
                 downtime_started = time.monotonic()
 
@@ -252,6 +419,9 @@ class MigrationService:
                     ),
                 )
 
+                self._set_record_status(
+                    migration_id, MigrationStatus.ACTIVATING
+                )
                 response = await self._client.activate(
                     activation_request
                 )
@@ -263,28 +433,13 @@ class MigrationService:
                     )
 
                 activated = True
-                self._registry.mark_remote(
+                await self._finalize_source_success(
                     task_id=task_id,
-                    owner_node_id=destination_node_id,
-                    generation=new_generation,
+                    destination_node_id=destination_node_id,
                     migration_id=migration_id,
+                    new_generation=new_generation,
                     migration_at_utc=migration_at_utc,
-                )
-
-                await self._broadcaster.broadcast(
-                    OwnershipUpdate(
-                        task_id=task_id,
-                        owner_node_id=destination_node_id,
-                        generation=new_generation,
-                        migration_at_utc=migration_at_utc,
-                        artifact_digests={
-                            binding.artifact_id: binding.digest
-                            for binding in artifact_bindings
-                        },
-                        accounting=self._registry.accounting_snapshot(
-                            task_id
-                        ),
-                    )
+                    artifact_bindings=artifact_bindings,
                 )
 
                 print(
@@ -296,14 +451,48 @@ class MigrationService:
                 return True
 
             except ActivationOutcomeUnknownError as exc:
-                # Never guess after a possibly-successful remote activation.
-                # Restarting locally here could create split-brain execution.
                 error = f"{type(exc).__name__}: {exc}"
+                self._set_record_status(
+                    migration_id,
+                    MigrationStatus.UNCERTAIN,
+                    error=error,
+                )
+                remote, destination_reached = await self._query_remote_outcome(
+                    destination_node_id, migration_id
+                )
+                if remote is not None and remote.status == MigrationStatus.ACTIVATED:
+                    activated = True
+                    await self._finalize_source_success(
+                        task_id=task_id,
+                        destination_node_id=destination_node_id,
+                        migration_id=migration_id,
+                        new_generation=new_generation,
+                        migration_at_utc=migration_at_utc,
+                        artifact_bindings=artifact_bindings,
+                    )
+                    print(
+                        f"[migration-resolved] task={task_id} "
+                        "outcome=activated",
+                        flush=True,
+                    )
+                    return True
+                if (
+                    remote is not None
+                    and remote.status == MigrationStatus.ROLLED_BACK
+                ) or (destination_reached and remote is None):
+                    record = self._journal.get(migration_id)
+                    if record is not None:
+                        await self._rollback_source_record(
+                            record,
+                            "Destination confirmed activation did not commit",
+                        )
+                    return False
+
                 self._registry.mark_recovery_exhausted(
                     task_id,
                     (
-                        "Migration activation outcome is unknown; "
-                        "source remains stopped for safe reconciliation. "
+                        "Migration activation outcome remains unknown; "
+                        "durable reconciliation will retry. "
                         f"{error}"
                     ),
                 )
@@ -344,6 +533,11 @@ class MigrationService:
                             ),
                         )
 
+                self._set_record_status(
+                    migration_id,
+                    MigrationStatus.ROLLED_BACK,
+                    error=error,
+                )
                 return False
 
             finally:
@@ -389,6 +583,7 @@ class MigrationService:
             )
 
         state = self._registry.get_state(request.task_id)
+        existing_record = self._journal.get(request.migration_id)
 
         # Idempotent retry after a successful activation/consumption.
         if (
@@ -396,6 +591,27 @@ class MigrationService:
             and state.owner_node_id == self._local_node.id
             and state.generation == request.generation
         ):
+            if existing_record is None:
+                self._put_record(
+                    MigrationRecord(
+                        migration_id=request.migration_id,
+                        bid_id=request.bid_id,
+                        task_id=request.task_id,
+                        source_node_id=request.source_node_id,
+                        destination_node_id=request.destination_node_id,
+                        generation=request.generation,
+                        migration_at_utc=request.migration_at_utc,
+                        role=MigrationRole.DESTINATION,
+                        status=MigrationStatus.ACTIVATED,
+                        pid=state.pid,
+                    )
+                )
+            else:
+                self._set_record_status(
+                    request.migration_id,
+                    MigrationStatus.ACTIVATED,
+                    pid=state.pid,
+                )
             return MigrationActivationResponse(
                 migration_id=request.migration_id,
                 task_id=request.task_id,
@@ -405,7 +621,39 @@ class MigrationService:
                 pid=state.pid,
             )
 
+        if (
+            existing_record is not None
+            and existing_record.status == MigrationStatus.ROLLED_BACK
+        ):
+            return MigrationActivationResponse(
+                migration_id=request.migration_id,
+                task_id=request.task_id,
+                destination_node_id=self._local_node.id,
+                generation=request.generation,
+                activated=False,
+                error=existing_record.error or "Activation previously rolled back",
+            )
+
         original_state = state.model_copy(deep=True)
+        if existing_record is None:
+            self._put_record(
+                MigrationRecord(
+                    migration_id=request.migration_id,
+                    bid_id=request.bid_id,
+                    task_id=request.task_id,
+                    source_node_id=request.source_node_id,
+                    destination_node_id=request.destination_node_id,
+                    generation=request.generation,
+                    migration_at_utc=request.migration_at_utc,
+                    role=MigrationRole.DESTINATION,
+                    status=MigrationStatus.ACTIVATING,
+                    original_state=original_state,
+                )
+            )
+        else:
+            self._set_record_status(
+                request.migration_id, MigrationStatus.ACTIVATING
+            )
         incoming_checkpoint = (
             self._registry.state_root
             / "incoming"
@@ -490,6 +738,11 @@ class MigrationService:
             runtime_started = True
 
             await self._bid_store.consume(request.bid_id)
+            self._set_record_status(
+                request.migration_id,
+                MigrationStatus.ACTIVATED,
+                pid=runtime_state.pid,
+            )
 
             print(
                 f"[migration-activated] "
@@ -538,6 +791,11 @@ class MigrationService:
                 backup.rename(local_checkpoint)
 
             self._registry.set_state(original_state)
+            self._set_record_status(
+                request.migration_id,
+                MigrationStatus.ROLLED_BACK,
+                error=error,
+            )
 
             try:
                 await self._bid_store.cancel(
@@ -571,3 +829,161 @@ class MigrationService:
                 activated=False,
                 error=error,
             )
+
+    async def _reconcile_destination_record(
+        self, record: MigrationRecord
+    ) -> None:
+        state = self._registry.get_state(record.task_id)
+        committed = (
+            state.owner_node_id == self._local_node.id
+            and state.generation == record.generation
+            and state.last_migration_id == record.migration_id
+            and state.status in {
+                TaskStatus.RUNNING,
+                TaskStatus.PAUSED,
+                TaskStatus.COMPLETED,
+            }
+        )
+        if committed:
+            bid = await self._bid_store.get(record.bid_id)
+            try:
+                if bid is not None and bid.status.value == "accepted":
+                    await self._bid_store.begin_activation(
+                        record.bid_id,
+                        record.task_id,
+                        record.source_node_id,
+                        record.destination_node_id,
+                    )
+                    bid = await self._bid_store.get(record.bid_id)
+                if bid is not None and bid.status.value == "activating":
+                    await self._bid_store.consume(record.bid_id)
+            except Exception:
+                pass
+            self._set_record_status(
+                record.migration_id,
+                MigrationStatus.ACTIVATED,
+                pid=state.pid,
+            )
+            return
+
+        # An interrupted destination transaction that did not establish a
+        # live local owner is rolled back from its durable original snapshot.
+        if (
+            state.last_migration_id == record.migration_id
+            and state.owner_node_id == self._local_node.id
+            and state.pid is not None
+        ):
+            try:
+                await asyncio.to_thread(self._runtime.stop, record.task_id)
+            except Exception:
+                pass
+
+        checkpoint = self._registry.checkpoint_directory(record.task_id)
+        backup = checkpoint.with_name(
+            f"checkpoint.rollback-{record.migration_id}"
+        )
+        if backup.exists():
+            if checkpoint.exists():
+                shutil.rmtree(checkpoint, ignore_errors=True)
+            backup.rename(checkpoint)
+        if record.original_state is not None:
+            self._registry.set_state(record.original_state)
+        try:
+            await self._bid_store.cancel(
+                record.bid_id,
+                reason="Daemon restart rolled back incomplete activation",
+            )
+        except Exception:
+            pass
+        shutil.rmtree(
+            self._registry.state_root / "incoming" / record.migration_id,
+            ignore_errors=True,
+        )
+        self._set_record_status(
+            record.migration_id,
+            MigrationStatus.ROLLED_BACK,
+            error="Daemon restart rolled back incomplete activation",
+        )
+
+    async def _reconcile_source_record(
+        self, record: MigrationRecord
+    ) -> None:
+        state = self._registry.get_state(record.task_id)
+        if (
+            state.owner_node_id == record.destination_node_id
+            and state.generation >= record.generation
+        ):
+            self._set_record_status(
+                record.migration_id, MigrationStatus.ACTIVATED
+            )
+            return
+
+        if (
+            record.status == MigrationStatus.PREPARING
+            and state.owner_node_id == self._local_node.id
+            and state.status != TaskStatus.MIGRATING
+        ):
+            self._set_record_status(
+                record.migration_id,
+                MigrationStatus.ROLLED_BACK,
+                error="Migration ended before source quiesce",
+            )
+            return
+
+        remote, destination_reached = await self._query_remote_outcome(
+            record.destination_node_id,
+            record.migration_id,
+            timeout_seconds=(
+                self._reconciliation_policy.activation_resolution_poll_seconds
+            ),
+        )
+        if remote is not None and remote.status == MigrationStatus.ACTIVATED:
+            await self._finalize_source_success(
+                task_id=record.task_id,
+                destination_node_id=record.destination_node_id,
+                migration_id=record.migration_id,
+                new_generation=record.generation,
+                migration_at_utc=record.migration_at_utc,
+                artifact_bindings=[],
+            )
+            return
+        if (
+            remote is not None
+            and remote.status == MigrationStatus.ROLLED_BACK
+        ) or (destination_reached and remote is None):
+            await self._rollback_source_record(
+                record,
+                "Durable reconciliation confirmed no destination activation",
+            )
+            return
+        self._set_record_status(
+            record.migration_id,
+            MigrationStatus.UNCERTAIN,
+            error="Destination outcome still unreachable",
+        )
+
+    async def reconcile_durable_state(self) -> int:
+        repaired = 0
+        terminal = {
+            MigrationStatus.ACTIVATED,
+            MigrationStatus.ROLLED_BACK,
+        }
+        for record in self._journal.list_records():
+            if record.status in terminal:
+                continue
+            async with self._lock_for(record.task_id):
+                before = self._journal.get(record.migration_id)
+                if record.role == MigrationRole.DESTINATION:
+                    await self._reconcile_destination_record(record)
+                else:
+                    await self._reconcile_source_record(record)
+                after = self._journal.get(record.migration_id)
+                if before != after:
+                    repaired += 1
+        if repaired:
+            print(
+                f"[migration-reconcile] node={self._local_node.id} "
+                f"records={repaired}",
+                flush=True,
+            )
+        return repaired

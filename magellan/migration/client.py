@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import httpx
 
@@ -8,6 +9,7 @@ from magellan.config.models import ClusterConfig
 from magellan.migration.models import (
     MigrationActivationRequest,
     MigrationActivationResponse,
+    MigrationRecord,
     OwnershipUpdate,
 )
 
@@ -60,11 +62,18 @@ class MigrationClient:
                     )
                     response.raise_for_status()
 
-                    return (
-                        MigrationActivationResponse.model_validate(
-                            response.json()
-                        )
+                    result = MigrationActivationResponse.model_validate(
+                        response.json()
                     )
+                    if os.getenv(
+                        "MAGELLAN_TEST_FORCE_ACTIVATION_RESPONSE_LOSS",
+                        "",
+                    ).lower() in {"1", "true", "yes"}:
+                        raise ActivationOutcomeUnknownError(
+                            "Injected activation response loss after "
+                            "destination committed"
+                        )
+                    return result
 
             except (httpx.HTTPError, ValueError) as exc:
                 last_error = exc
@@ -76,6 +85,30 @@ class MigrationClient:
             "Destination activation outcome is unknown after retries: "
             f"{last_error}"
         )
+
+
+    async def status(
+        self,
+        destination_node_id: str,
+        migration_id: str,
+    ) -> MigrationRecord | None:
+        destination = self._cluster.get_node(destination_node_id)
+        url = (
+            f"http://{destination.internal_ip}:"
+            f"{self._cluster.api_port}/migrations/{migration_id}"
+        )
+        timeout = httpx.Timeout(self._cluster.request_timeout_seconds)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(url)
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                return MigrationRecord.model_validate(response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ActivationOutcomeUnknownError(
+                f"Could not query migration {migration_id}: {exc}"
+            ) from exc
 
 
 class OwnershipBroadcaster:

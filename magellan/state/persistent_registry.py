@@ -716,6 +716,7 @@ class PersistentTaskRegistry:
         task_id: str,
         owner_node_id: str,
         generation: int,
+        migration_id: str | None = None,
         migration_at_utc: datetime | None = None,
         status: TaskStatus | None = None,
         completed_at_utc: datetime | None = None,
@@ -726,6 +727,9 @@ class PersistentTaskRegistry:
         state = self.get_state(task_id)
 
         if generation < state.generation:
+            return False
+
+        if generation == state.generation and owner_node_id != state.owner_node_id:
             return False
 
         if (
@@ -741,6 +745,8 @@ class PersistentTaskRegistry:
         if accounting is not None:
             self._apply_accounting_snapshot(state, accounting)
 
+        if migration_id is not None:
+            state.last_migration_id = migration_id
         if migration_at_utc is not None:
             state.last_migration_at_utc = migration_at_utc
 
@@ -767,6 +773,34 @@ class PersistentTaskRegistry:
 
         self.set_state(state)
         return True
+
+    def ownership_updates(self):
+        from magellan.migration.models import OwnershipUpdate
+
+        updates = []
+        for state in self.all_states():
+            updates.append(
+                OwnershipUpdate(
+                    task_id=state.task_id,
+                    owner_node_id=state.owner_node_id,
+                    generation=state.generation,
+                    last_migration_id=state.last_migration_id,
+                    migration_at_utc=state.last_migration_at_utc,
+                    artifact_digests=dict(state.artifact_digests),
+                    status=(
+                        state.status
+                        if state.status == TaskStatus.COMPLETED
+                        else None
+                    ),
+                    completed_at_utc=state.completed_at_utc,
+                    final_output_manifest_sha256=(
+                        state.final_output_manifest_sha256
+                    ),
+                    final_output_bytes=state.final_output_bytes,
+                    accounting=state.accounting_snapshot(),
+                )
+            )
+        return updates
 
     def summaries(self) -> list[dict]:
         result = []

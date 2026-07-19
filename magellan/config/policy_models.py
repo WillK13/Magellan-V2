@@ -60,6 +60,18 @@ class AccountingPolicy(BaseModel):
     progress_ema_alpha: float = Field(default=0.5, gt=0, le=1)
 
 
+
+
+class ReconciliationPolicy(BaseModel):
+    enabled: bool = True
+    scan_interval_seconds: float = Field(default=5.0, gt=0)
+    activation_resolution_timeout_seconds: float = Field(
+        default=30.0, gt=0
+    )
+    activation_resolution_poll_seconds: float = Field(
+        default=1.0, gt=0
+    )
+
 class ClockPolicy(BaseModel):
     mode: Literal["wall", "trace"]
     trace_start_utc: str | None = None
@@ -73,4 +85,7 @@ class ScoringPolicy(BaseModel):
     migration: MigrationPolicy
     recovery: RecoveryPolicy = Field(default_factory=RecoveryPolicy)
     accounting: AccountingPolicy = Field(default_factory=AccountingPolicy)
+    reconciliation: ReconciliationPolicy = Field(
+        default_factory=ReconciliationPolicy
+    )
     clock: ClockPolicy

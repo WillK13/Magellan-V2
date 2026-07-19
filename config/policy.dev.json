@@ -35,5 +35,11 @@
   "accounting": {
     "scan_interval_seconds": 1,
     "progress_ema_alpha": 0.5
+  },
+  "reconciliation": {
+    "enabled": true,
+    "scan_interval_seconds": 1,
+    "activation_resolution_timeout_seconds": 8,
+    "activation_resolution_poll_seconds": 0.5
   }
 }
