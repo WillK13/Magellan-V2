@@ -24,6 +24,15 @@ from magellan.migration.models import (
 
 from magellan.reconciliation.models import OwnershipSnapshot
 
+
+from magellan.submission.models import (
+    TaskCatalogSnapshot,
+    TaskDefinitionRecord,
+    TaskDefinitionSubmission,
+    TaskRunSubmission,
+    TaskRunView,
+)
+
 from magellan.artifacts.models import (
     ArtifactCommitRequest,
     ArtifactCommitResponse,
@@ -93,7 +102,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.5.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 
@@ -132,6 +141,12 @@ async def health() -> dict:
         ),
         "migration_record_count": len(
             context.migration_journal.list_records()
+        ),
+        "task_definition_count": len(
+            context.task_catalog.list_definitions()
+        ),
+        "task_run_count": len(
+            context.task_catalog.list_runs()
         ),
         "last_reconciliation_at_utc": (
             context.reconciliation_service.last_completed_at_utc
@@ -183,6 +198,75 @@ async def tasks() -> dict:
         "tasks": context.registry.summaries(),
     }
 
+
+@app.post(
+    "/task-definitions",
+    response_model=TaskDefinitionRecord,
+)
+async def submit_task_definition(
+    submission: TaskDefinitionSubmission,
+) -> TaskDefinitionRecord:
+    try:
+        return await asyncio.to_thread(
+            context.submission_service.submit_definition,
+            submission,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get(
+    "/task-definitions",
+    response_model=list[TaskDefinitionRecord],
+)
+async def list_task_definitions() -> list[TaskDefinitionRecord]:
+    return context.task_catalog.list_definitions()
+
+
+@app.get(
+    "/task-definitions/{definition_id}",
+    response_model=TaskDefinitionRecord,
+)
+async def get_task_definition(
+    definition_id: str,
+    revision: int | None = None,
+) -> TaskDefinitionRecord:
+    try:
+        return context.task_catalog.get_definition(definition_id, revision)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/task-runs", response_model=TaskRunView)
+async def create_task_run(submission: TaskRunSubmission) -> TaskRunView:
+    try:
+        return await asyncio.to_thread(
+            context.submission_service.create_run,
+            submission,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/task-runs", response_model=list[TaskRunView])
+async def list_task_runs() -> list[TaskRunView]:
+    return context.submission_service.list_runs()
+
+
+@app.get("/task-runs/{run_id}", response_model=TaskRunView)
+async def get_task_run(run_id: str) -> TaskRunView:
+    try:
+        return context.submission_service.view_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/catalog/snapshot", response_model=TaskCatalogSnapshot)
+async def catalog_snapshot() -> TaskCatalogSnapshot:
+    return context.task_catalog.snapshot()
+
 @app.post("/bids", response_model=BidRecord)
 async def submit_bid(
     request: BidRequest,
@@ -214,7 +298,7 @@ async def submit_bid(
     record = await context.bid_store.submit(request)
 
     print(
-        f"[bid-received] node={context.local_node.id} "
+        f"[task-bid-received] node={context.local_node.id} "
         f"bid={record.bid_id} "
         f"task={record.task_id} "
         f"source={record.source_node_id} "
@@ -283,6 +367,16 @@ async def cancel_bid(
             status_code=404,
             detail=str(exc),
         ) from exc
+
+
+@app.post("/task-runs/{run_id}/start")
+async def start_task_run(run_id: str) -> dict:
+    return await start_task(run_id)
+
+
+@app.post("/task-runs/{run_id}/stop")
+async def stop_task_run(run_id: str) -> dict:
+    return await stop_task(run_id)
 
 
 @app.post("/tasks/{task_id}/start")

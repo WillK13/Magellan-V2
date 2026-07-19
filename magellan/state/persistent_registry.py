@@ -224,6 +224,27 @@ class PersistentTaskRegistry:
         )
         os.replace(temporary, path)
 
+    def register_definition(
+        self,
+        definition: TaskDefinition,
+    ) -> bool:
+        """Register a runtime-created task without restarting the daemon."""
+        task_id = definition.profile.task_id
+        with self._lock:
+            existing = self._definitions.get(task_id)
+            if existing is not None:
+                if (
+                    existing.model_dump(mode="json")
+                    != definition.model_dump(mode="json")
+                ):
+                    raise RuntimeError(
+                        f"Conflicting task definition for {task_id}"
+                    )
+                return False
+            self._definitions[task_id] = definition.model_copy(deep=True)
+            self._initialize_state_if_missing(definition)
+            return True
+
     def get_definition(self, task_id: str) -> TaskDefinition:
         try:
             return self._definitions[task_id].model_copy(deep=True)

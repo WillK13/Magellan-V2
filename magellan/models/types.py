@@ -13,6 +13,13 @@ class ActionType(str, Enum):
     MIGRATE = "migrate"
 
 
+class TaskResourceRequest(BaseModel):
+    cpu_cores: float = Field(default=1.0, gt=0)
+    memory_mb: int = Field(default=0, ge=0)
+    gpu_count: int = Field(default=0, ge=0)
+    accelerator_type: str | None = None
+
+
 class TaskProfile(BaseModel):
     task_id: str = Field(min_length=1)
     workload_type: str = Field(min_length=1)
@@ -32,6 +39,14 @@ class TaskProfile(BaseModel):
     cost_cap_usd: float | None = Field(default=None, gt=0)
     last_migration_at: datetime | None = None
     last_pause_at: datetime | None = None
+
+    # Carried with task bids. The current slot arbiter does not yet enforce
+    # these fields; the resource-aware auction milestone will.
+    priority: int = Field(default=0, ge=0, le=100)
+    deadline_at_utc: datetime | None = None
+    resource_request: TaskResourceRequest = Field(
+        default_factory=TaskResourceRequest
+    )
 
 
 class RawActionEstimate(BaseModel):

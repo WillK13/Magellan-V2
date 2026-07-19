@@ -15,9 +15,10 @@ class CapacityRegistry(Protocol):
 
 class BidArbiter:
     """
-    Collects bids during a fixed window and accepts the lowest
-    scores up to the destination's available capacity. Accepted
-    bids become expiring capacity reservations.
+    Destination-local auction for task bids. Tasks compete for this
+    node's scarce capacity; the node never bids for tasks. During each
+    fixed window, the arbiter accepts the lowest scheduling scores up
+    to available capacity. Accepted task bids become expiring leases.
     """
 
     def __init__(

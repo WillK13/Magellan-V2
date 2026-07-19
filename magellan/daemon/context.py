@@ -54,6 +54,9 @@ from magellan.artifacts.prefetch import (
 from magellan.artifacts.transfer import (
     RsyncArtifactTransfer,
 )
+from magellan.submission.catalog import TaskCatalogStore
+from magellan.submission.client import TaskCatalogClient
+from magellan.submission.service import TaskSubmissionService
 
 
 @dataclass
@@ -85,6 +88,8 @@ class DaemonContext:
     prefetch_service: ArtifactPrefetchService
     migration_journal: MigrationJournal
     reconciliation_service: DistributedReconciliationService
+    task_catalog: TaskCatalogStore
+    submission_service: TaskSubmissionService
 
 
 def _task_files() -> list[Path]:
@@ -98,11 +103,6 @@ def _task_files() -> list[Path]:
         for item in raw.split(",")
         if item.strip()
     ]
-
-    if not paths:
-        raise RuntimeError(
-            "MAGELLAN_TASK_FILES contained no paths"
-        )
 
     return paths
 
@@ -156,11 +156,18 @@ def build_daemon_context() -> DaemonContext:
     policy = load_policy_config(policy_path)
     local_node = cluster.get_node(node_id)
 
+    task_catalog = TaskCatalogStore(
+        state_root=state_root,
+        local_node_id=local_node.id,
+    )
+
     registry = PersistentTaskRegistry.from_files(
         paths=_task_files(),
         state_root=state_root,
         local_node_id=local_node.id,
     )
+    for dynamic_definition in task_catalog.materialized_definitions():
+        registry.register_definition(dynamic_definition)
 
     artifact_manager = ArtifactManager(
         registry=registry,
@@ -307,6 +314,14 @@ def build_daemon_context() -> DaemonContext:
         accounting_service=accounting_service,
     )
 
+    submission_service = TaskSubmissionService(
+        local_node=local_node,
+        cluster=cluster,
+        catalog=task_catalog,
+        registry=registry,
+        runtime=runtime,
+    )
+
     reconciliation_service = DistributedReconciliationService(
         local_node_id=local_node.id,
         policy=policy.reconciliation,
@@ -316,6 +331,11 @@ def build_daemon_context() -> DaemonContext:
             local_node_id=local_node.id,
         ),
         migration_service=migration_service,
+        catalog=task_catalog,
+        catalog_client=TaskCatalogClient(
+            cluster=cluster,
+            local_node_id=local_node.id,
+        ),
     )
 
     return DaemonContext(
@@ -342,4 +362,6 @@ def build_daemon_context() -> DaemonContext:
         artifact_client=artifact_client,
         migration_journal=migration_journal,
         reconciliation_service=reconciliation_service,
+        task_catalog=task_catalog,
+        submission_service=submission_service,
     )

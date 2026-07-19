@@ -9,6 +9,7 @@ from magellan.bidding.client import BidClient
 from magellan.bidding.models import (
     BidRequest,
     BidStatus,
+    TaskBidContext,
 )
 from magellan.carbon.store import CarbonStore
 from magellan.config.models import (
@@ -79,6 +80,24 @@ class SchedulerService:
         self._accounting_service = accounting_service
         self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
         self._task_operation_locks: dict[str, asyncio.Lock] = {}
+
+
+    def _task_bid_context(
+        self,
+        task,
+        static_data_bytes: int,
+    ) -> TaskBidContext:
+        return TaskBidContext(
+            workload_type=task.workload_type,
+            priority=task.priority,
+            deadline_at_utc=task.deadline_at_utc,
+            estimated_remaining_seconds=task.estimated_remaining_seconds,
+            checkpoint_bytes=task.checkpoint_bytes,
+            static_data_bytes=static_data_bytes,
+            accumulated_cost_usd=task.accumulated_cost_usd,
+            cost_cap_usd=task.cost_cap_usd,
+            resource_request=task.resource_request,
+        )
 
     def _task_operation_lock(self, task_id: str) -> asyncio.Lock:
         """Serialize scheduler and operator actions for one task."""
@@ -249,6 +268,13 @@ class SchedulerService:
                 f"{int(trace_time.timestamp())}"
             ),
             task_id=task_id,
+            task_context=self._task_bid_context(
+                task,
+                static_data_bytes_by_destination.get(
+                    selected.destination_node_id,
+                    0,
+                ),
+            ),
             source_node_id=self._local_node.id,
             destination_node_id=selected.destination_node_id,
             candidate=selected,
@@ -464,6 +490,10 @@ class SchedulerService:
                 f"{int(trace_time.timestamp())}"
             ),
             task_id=task_id,
+            task_context=self._task_bid_context(
+                task,
+                missing_bytes,
+            ),
             source_node_id=self._local_node.id,
             destination_node_id=destination_node_id,
             candidate=candidate,

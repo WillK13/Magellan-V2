@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from magellan.models.types import ActionType, ScoredAction
+from magellan.models.types import ActionType, ScoredAction, TaskResourceRequest
 
 
 class BidStatus(str, Enum):
@@ -18,10 +19,26 @@ class BidStatus(str, Enum):
     EXPIRED = "expired"
 
 
+class TaskBidContext(BaseModel):
+    workload_type: str = Field(min_length=1)
+    priority: int = Field(default=0, ge=0, le=100)
+    deadline_at_utc: datetime | None = None
+    estimated_remaining_seconds: float | None = Field(default=None, ge=0)
+    checkpoint_bytes: int = Field(default=0, ge=0)
+    static_data_bytes: int = Field(default=0, ge=0)
+    accumulated_cost_usd: float = Field(default=0.0, ge=0)
+    cost_cap_usd: float | None = Field(default=None, gt=0)
+    resource_request: TaskResourceRequest = Field(
+        default_factory=TaskResourceRequest
+    )
+
+
 class BidRequest(BaseModel):
     bid_id: str = Field(min_length=1)
     epoch_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
+    bidder_type: Literal["task"] = "task"
+    task_context: TaskBidContext | None = None
 
     source_node_id: str = Field(min_length=1)
     destination_node_id: str = Field(min_length=1)
