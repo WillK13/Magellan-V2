@@ -30,6 +30,8 @@ class PausePolicy(BaseModel):
     idle_seconds: float = Field(ge=0)
     resume_seconds: float = Field(ge=0)
     max_pause_window_seconds: float = Field(gt=0)
+    min_pause_gap_seconds: float = Field(default=0.0, ge=0)
+    scan_interval_seconds: float = Field(default=1.0, gt=0)
 
 
 class MigrationPolicy(BaseModel):
@@ -44,12 +46,18 @@ class MigrationPolicy(BaseModel):
         gt=0,
     )
 
+
 class RecoveryPolicy(BaseModel):
     enabled: bool = True
     max_restart_attempts: int = Field(default=3, ge=0)
     initial_backoff_seconds: float = Field(default=5.0, ge=0)
     max_backoff_seconds: float = Field(default=60.0, ge=0)
     scan_interval_seconds: float = Field(default=1.0, gt=0)
+
+
+class AccountingPolicy(BaseModel):
+    scan_interval_seconds: float = Field(default=1.0, gt=0)
+    progress_ema_alpha: float = Field(default=0.5, gt=0, le=1)
 
 
 class ClockPolicy(BaseModel):
@@ -64,4 +72,5 @@ class ScoringPolicy(BaseModel):
     pause: PausePolicy
     migration: MigrationPolicy
     recovery: RecoveryPolicy = Field(default_factory=RecoveryPolicy)
+    accounting: AccountingPolicy = Field(default_factory=AccountingPolicy)
     clock: ClockPolicy

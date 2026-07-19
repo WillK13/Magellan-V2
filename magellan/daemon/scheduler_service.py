@@ -21,10 +21,12 @@ from magellan.migration.client import OwnershipBroadcaster
 from magellan.migration.models import OwnershipUpdate
 from magellan.migration.service import MigrationService
 from magellan.models.types import ActionType
+from magellan.runtime.accounting import RuntimeAccountingService
 from magellan.runtime.clock import MagellanClock
 from magellan.runtime.local_process import (
     LocalProcessRuntime,
 )
+from magellan.runtime.pause import PauseService
 from magellan.scheduler.scoring import evaluate_task
 from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
@@ -57,6 +59,8 @@ class SchedulerService:
         checkpoint_manager: CheckpointManager,
         prefetch_service: ArtifactPrefetchService,
         broadcaster: OwnershipBroadcaster,
+        pause_service: PauseService,
+        accounting_service: RuntimeAccountingService,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -71,6 +75,8 @@ class SchedulerService:
         self._checkpoint_manager = checkpoint_manager
         self._prefetch_service = prefetch_service
         self._broadcaster = broadcaster
+        self._pause_service = pause_service
+        self._accounting_service = accounting_service
         self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
 
     async def _evaluate_task(
@@ -78,6 +84,13 @@ class SchedulerService:
         task_id: str,
         trace_time,
     ) -> None:
+        await asyncio.to_thread(
+            self._accounting_service.settle_task,
+            task_id,
+            None,
+            trace_time,
+        )
+
         try:
             checkpoint_summary = await asyncio.to_thread(
                 self._checkpoint_manager.validate,
@@ -178,7 +191,21 @@ class SchedulerService:
             flush=True,
         )
 
-        if selected.action != ActionType.MIGRATE:
+        if selected.action == ActionType.CONTINUE:
+            return
+
+        if selected.action == ActionType.PAUSE:
+            await self._pause_service.pause(
+                task_id=task_id,
+                at_utc=trace_time,
+                idle_seconds=float(
+                    selected.details.get(
+                        "idle_seconds",
+                        self._policy.pause.idle_seconds,
+                    )
+                ),
+                reason=decision.reason,
+            )
             return
 
         if selected.destination_node_id is None:
@@ -224,6 +251,71 @@ class SchedulerService:
                 migration_at_utc=trace_time.to_pydatetime(),
                 bid_id=result.bid_id,
             )
+
+    async def request_pause(
+        self,
+        task_id: str,
+        idle_seconds: float | None = None,
+        reason: str = "Operator requested pause",
+    ) -> dict:
+        state = self._registry.get_state(task_id)
+        if state.owner_node_id != self._local_node.id:
+            raise RuntimeError(
+                f"Cannot pause {task_id}; owner is "
+                f"{state.owner_node_id}"
+            )
+        if state.status != TaskStatus.RUNNING:
+            raise RuntimeError(
+                f"Cannot pause {task_id}; status is "
+                f"{state.status.value}"
+            )
+
+        requested_idle = (
+            self._policy.pause.idle_seconds
+            if idle_seconds is None
+            else idle_seconds
+        )
+        if requested_idle < 0:
+            raise ValueError("idle_seconds must be non-negative")
+        if requested_idle > self._policy.pause.max_pause_window_seconds:
+            raise ValueError(
+                "idle_seconds exceeds max_pause_window_seconds"
+            )
+
+        trace_time = self._clock.now()
+        await asyncio.to_thread(
+            self._accounting_service.settle_task,
+            task_id,
+            None,
+            trace_time,
+        )
+        paused = await self._pause_service.pause(
+            task_id=task_id,
+            at_utc=trace_time,
+            idle_seconds=requested_idle,
+            reason=reason,
+        )
+        return paused.model_dump(mode="json")
+
+    async def request_resume(self, task_id: str) -> dict:
+        state = self._registry.get_state(task_id)
+        if state.owner_node_id != self._local_node.id:
+            raise RuntimeError(
+                f"Cannot resume {task_id}; owner is "
+                f"{state.owner_node_id}"
+            )
+        if state.status != TaskStatus.PAUSED:
+            raise RuntimeError(
+                f"Cannot resume {task_id}; status is "
+                f"{state.status.value}"
+            )
+
+        await asyncio.to_thread(
+            self._accounting_service.settle_task,
+            task_id,
+        )
+        resumed = await self._pause_service.resume(task_id)
+        return resumed.model_dump(mode="json")
 
     async def request_migration(
         self,
@@ -359,6 +451,7 @@ class SchedulerService:
                         state.final_output_manifest_sha256
                     ),
                     final_output_bytes=state.final_output_bytes,
+                    accounting=state.accounting_snapshot(),
                 )
             )
             self._broadcasted_completions.add(key)

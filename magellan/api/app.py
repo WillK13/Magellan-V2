@@ -48,6 +48,14 @@ async def lifespan(_: FastAPI):
             context.recovery_service.run(stop_event),
             name="magellan-recovery",
         ),
+        asyncio.create_task(
+            context.pause_service.run(stop_event),
+            name="magellan-pause",
+        ),
+        asyncio.create_task(
+            context.accounting_service.run(stop_event),
+            name="magellan-accounting",
+        ),
     ]
 
     print(
@@ -78,7 +86,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.3.0",
+    version="0.4.1",
     lifespan=lifespan,
 )
 
@@ -109,6 +117,10 @@ async def health() -> dict:
         "active_reservation_count": active_reservations,
         "completed_task_count": sum(
             item["state"]["status"] == "completed"
+            for item in context.registry.summaries()
+        ),
+        "paused_task_count": sum(
+            item["state"]["status"] == "paused"
             for item in context.registry.summaries()
         ),
         "timestamp_utc": datetime.now(
@@ -273,6 +285,46 @@ async def start_task(task_id: str) -> dict:
     return state.model_dump(mode="json")
 
 
+@app.post("/tasks/{task_id}/pause")
+async def pause_task(
+    task_id: str,
+    idle_seconds: float | None = None,
+) -> dict:
+    try:
+        return await context.scheduler_service.request_pause(
+            task_id=task_id,
+            idle_seconds=idle_seconds,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+
+@app.post("/tasks/{task_id}/resume")
+async def resume_task(task_id: str) -> dict:
+    try:
+        return await context.scheduler_service.request_resume(
+            task_id
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+
 @app.post(
     "/tasks/{task_id}/migrate/{destination_node_id}"
 )
@@ -300,6 +352,10 @@ async def migrate_task(
 @app.post("/tasks/{task_id}/stop")
 async def stop_task(task_id: str) -> dict:
     try:
+        await asyncio.to_thread(
+            context.accounting_service.settle_task,
+            task_id,
+        )
         state = await asyncio.to_thread(
             context.runtime.stop,
             task_id,
@@ -341,6 +397,7 @@ async def ownership_update(
                 update.final_output_manifest_sha256
             ),
             final_output_bytes=update.final_output_bytes,
+            accounting=update.accounting,
         )
 
         if update.artifact_digests:

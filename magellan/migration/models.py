@@ -5,7 +5,10 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from magellan.artifacts.models import ArtifactBinding
-from magellan.state.task_models import TaskStatus
+from magellan.state.task_models import (
+    TaskAccountingSnapshot,
+    TaskStatus,
+)
 
 
 class MigrationActivationRequest(BaseModel):
@@ -21,6 +24,7 @@ class MigrationActivationRequest(BaseModel):
     artifacts: list[ArtifactBinding] = Field(
         default_factory=list
     )
+    accounting: TaskAccountingSnapshot | None = None
 
 
 class MigrationActivationResponse(BaseModel):
@@ -48,3 +52,4 @@ class OwnershipUpdate(BaseModel):
     completed_at_utc: datetime | None = None
     final_output_manifest_sha256: str | None = None
     final_output_bytes: int | None = Field(default=None, ge=0)
+    accounting: TaskAccountingSnapshot | None = None

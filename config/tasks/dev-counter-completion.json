@@ -27,13 +27,16 @@
       "--completion-file",
       "{completion_file}",
       "--output-dir",
-      "{output_directory}"
+      "{output_directory}",
+      "--progress-file",
+      "{progress_file}"
     ],
     "environment": {},
     "working_directory": ".",
     "checkpoint_relative_path": "checkpoint/counter.json",
     "completion_relative_path": "runtime/completion.json",
     "output_relative_directory": "output",
-    "stop_timeout_seconds": 10
+    "stop_timeout_seconds": 10,
+    "progress_relative_path": "runtime/progress.json"
   }
 }

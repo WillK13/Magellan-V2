@@ -17,11 +17,40 @@ def utc_now() -> datetime:
 class TaskStatus(str, Enum):
     STOPPED = "stopped"
     RUNNING = "running"
+    PAUSED = "paused"
     MIGRATING = "migrating"
     RECOVERING = "recovering"
     REMOTE = "remote"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class TaskAccountingSnapshot(BaseModel):
+    estimated_remaining_seconds: float | None = Field(
+        default=None,
+        ge=0,
+    )
+
+    accumulated_runtime_seconds: float = Field(default=0.0, ge=0)
+    accumulated_paused_seconds: float = Field(default=0.0, ge=0)
+    accumulated_migration_seconds: float = Field(default=0.0, ge=0)
+
+    accumulated_compute_cost_usd: float = Field(default=0.0, ge=0)
+    accumulated_transfer_cost_usd: float = Field(default=0.0, ge=0)
+    accumulated_cost_usd: float = Field(default=0.0, ge=0)
+
+    accumulated_compute_carbon_grams: float = Field(default=0.0, ge=0)
+    accumulated_transfer_carbon_grams: float = Field(default=0.0, ge=0)
+    accumulated_carbon_grams: float = Field(default=0.0, ge=0)
+
+    progress_completed_units: float | None = Field(default=None, ge=0)
+    progress_total_units: float | None = Field(default=None, gt=0)
+    progress_fraction: float | None = Field(default=None, ge=0, le=1)
+    progress_rate_units_per_second: float | None = Field(
+        default=None,
+        gt=0,
+    )
+    progress_updated_at_utc: datetime | None = None
 
 
 class LocalProcessSpec(BaseModel):
@@ -41,6 +70,9 @@ class LocalProcessSpec(BaseModel):
     readiness_relative_path: str | None = None
     readiness_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    # Standardized workload progress record relative to the task directory.
+    progress_relative_path: str | None = None
+
     # A workload writes this marker only after successful natural completion.
     completion_relative_path: str | None = None
 
@@ -54,6 +86,7 @@ class LocalProcessSpec(BaseModel):
         values = {
             "checkpoint_relative_path": self.checkpoint_relative_path,
             "readiness_relative_path": self.readiness_relative_path,
+            "progress_relative_path": self.progress_relative_path,
             "completion_relative_path": self.completion_relative_path,
             "output_relative_directory": self.output_relative_directory,
         }
@@ -117,6 +150,12 @@ class TaskRuntimeState(BaseModel):
 
     # Stored in the scheduler's evaluation-clock domain.
     last_migration_at_utc: datetime | None = None
+    last_pause_at_utc: datetime | None = None
+    paused_at_utc: datetime | None = None
+    resume_at_utc: datetime | None = None
+    resume_wall_at_utc: datetime | None = None
+    pause_reason: str | None = None
+    pause_count: int = Field(default=0, ge=0)
 
     last_error: str | None = None
     last_exit_code: int | None = None
@@ -133,6 +172,40 @@ class TaskRuntimeState(BaseModel):
 
     created_at_utc: datetime = Field(default_factory=utc_now)
     updated_at_utc: datetime = Field(default_factory=utc_now)
+    started_at_utc: datetime | None = None
+    last_accounted_at_utc: datetime | None = None
+
+    estimated_remaining_seconds: float | None = Field(default=None, ge=0)
+
+    accumulated_runtime_seconds: float = Field(default=0.0, ge=0)
+    accumulated_paused_seconds: float = Field(default=0.0, ge=0)
+    accumulated_migration_seconds: float = Field(default=0.0, ge=0)
+
+    accumulated_compute_cost_usd: float = Field(default=0.0, ge=0)
+    accumulated_transfer_cost_usd: float = Field(default=0.0, ge=0)
+    accumulated_cost_usd: float = Field(default=0.0, ge=0)
+
+    accumulated_compute_carbon_grams: float = Field(default=0.0, ge=0)
+    accumulated_transfer_carbon_grams: float = Field(default=0.0, ge=0)
+    accumulated_carbon_grams: float = Field(default=0.0, ge=0)
+
+    progress_completed_units: float | None = Field(default=None, ge=0)
+    progress_total_units: float | None = Field(default=None, gt=0)
+    progress_fraction: float | None = Field(default=None, ge=0, le=1)
+    progress_rate_units_per_second: float | None = Field(
+        default=None,
+        gt=0,
+    )
+    progress_updated_at_utc: datetime | None = None
+
     artifact_digests: dict[str, str] = Field(
         default_factory=dict
     )
+
+    def accounting_snapshot(self) -> TaskAccountingSnapshot:
+        return TaskAccountingSnapshot(
+            **{
+                name: getattr(self, name)
+                for name in TaskAccountingSnapshot.model_fields
+            }
+        )

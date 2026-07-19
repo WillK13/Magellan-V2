@@ -41,6 +41,38 @@ def atomic_write(path: Path, value: int) -> None:
     )
 
 
+def write_progress(
+    path: Path | None,
+    value: int,
+    max_value: int | None,
+) -> None:
+    if path is None:
+        return
+
+    atomic_json_write(
+        path,
+        {
+            "format_version": 1,
+            "task_id": os.getenv(
+                "MAGELLAN_TASK_ID",
+                "unknown",
+            ),
+            "completed_units": value,
+            "total_units": max_value,
+            "updated_at_utc": datetime.now(
+                timezone.utc
+            ).isoformat(),
+            "node_id": os.getenv(
+                "MAGELLAN_NODE_ID",
+                "unknown",
+            ),
+            "details": {
+                "unit": "counter-value",
+            },
+        },
+    )
+
+
 def load_value(path: Path) -> int:
     if not path.exists():
         return 0
@@ -63,6 +95,10 @@ def main() -> None:
         default=None,
     )
     parser.add_argument(
+        "--progress-file",
+        default=None,
+    )
+    parser.add_argument(
         "--completion-file",
         default=None,
     )
@@ -78,6 +114,11 @@ def main() -> None:
         )
 
     checkpoint_path = Path(args.checkpoint_file)
+    progress_path = (
+        Path(args.progress_file)
+        if args.progress_file is not None
+        else None
+    )
     completion_path = (
         Path(args.completion_file)
         if args.completion_file is not None
@@ -100,12 +141,23 @@ def main() -> None:
         flush=True,
     )
 
+    write_progress(
+        progress_path,
+        value,
+        args.max_value,
+    )
+
     while not stop_requested:
         if args.max_value is not None and value >= args.max_value:
             break
 
         value += 1
         atomic_write(checkpoint_path, value)
+        write_progress(
+            progress_path,
+            value,
+            args.max_value,
+        )
 
         print(
             f"[counter] value={value} "
@@ -116,6 +168,11 @@ def main() -> None:
         time.sleep(args.interval_seconds)
 
     atomic_write(checkpoint_path, value)
+    write_progress(
+        progress_path,
+        value,
+        args.max_value,
+    )
 
     natural_completion = (
         not stop_requested

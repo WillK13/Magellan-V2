@@ -9,7 +9,9 @@
     "pause_seconds": 120,
     "idle_seconds": 300,
     "resume_seconds": 120,
-    "max_pause_window_seconds": 7200
+    "max_pause_window_seconds": 7200,
+    "min_pause_gap_seconds": 600,
+    "scan_interval_seconds": 0.5
   },
   "migration": {
     "min_migration_gap_seconds": 60,
@@ -29,5 +31,9 @@
     "initial_backoff_seconds": 2,
     "max_backoff_seconds": 15,
     "scan_interval_seconds": 1
+  },
+  "accounting": {
+    "scan_interval_seconds": 1,
+    "progress_ema_alpha": 0.5
   }
 }

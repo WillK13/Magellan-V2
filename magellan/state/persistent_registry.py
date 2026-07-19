@@ -9,6 +9,7 @@ from typing import Iterable
 
 from magellan.models.types import TaskProfile
 from magellan.state.task_models import (
+    TaskAccountingSnapshot,
     TaskDefinition,
     TaskRuntimeState,
     TaskStatus,
@@ -19,6 +20,7 @@ from magellan.state.task_models import (
 _CAPACITY_STATUSES = {
     TaskStatus.STOPPED,
     TaskStatus.RUNNING,
+    TaskStatus.PAUSED,
     TaskStatus.MIGRATING,
     TaskStatus.RECOVERING,
     TaskStatus.FAILED,
@@ -157,6 +159,15 @@ class PersistentTaskRegistry:
 
         return self.task_directory(task_id) / relative
 
+    def progress_file(self, task_id: str) -> Path | None:
+        definition = self.get_definition(task_id)
+        relative = definition.runtime.progress_relative_path
+
+        if relative is None:
+            return None
+
+        return self.task_directory(task_id) / relative
+
     def _state_path(self, task_id: str) -> Path:
         return self.task_directory(task_id) / "state.json"
 
@@ -187,6 +198,15 @@ class PersistentTaskRegistry:
                 task_id=task_id,
                 owner_node_id=initial_owner,
                 status=status,
+                estimated_remaining_seconds=(
+                    definition.profile.estimated_remaining_seconds
+                ),
+                accumulated_compute_cost_usd=(
+                    definition.profile.accumulated_cost_usd
+                ),
+                accumulated_cost_usd=(
+                    definition.profile.accumulated_cost_usd
+                ),
             )
         )
 
@@ -246,6 +266,19 @@ class PersistentTaskRegistry:
             )
         ]
 
+    def paused_owned_task_ids(
+        self,
+        node_id: str,
+    ) -> list[str]:
+        return [
+            state.task_id
+            for state in self.all_states()
+            if (
+                state.owner_node_id == node_id
+                and state.status == TaskStatus.PAUSED
+            )
+        ]
+
     def failed_owned_task_ids(
         self,
         node_id: str,
@@ -269,6 +302,13 @@ class PersistentTaskRegistry:
         updates: dict = {
             "current_node_id": state.owner_node_id,
             "last_migration_at": state.last_migration_at_utc,
+            "last_pause_at": state.last_pause_at_utc,
+            "estimated_remaining_seconds": (
+                state.estimated_remaining_seconds
+                if state.estimated_remaining_seconds is not None
+                else definition.profile.estimated_remaining_seconds
+            ),
+            "accumulated_cost_usd": state.accumulated_cost_usd,
         }
 
         if checkpoint_bytes is not None:
@@ -278,6 +318,83 @@ class PersistentTaskRegistry:
             deep=True,
             update=updates,
         )
+
+    def _apply_accounting_snapshot(
+        self,
+        state: TaskRuntimeState,
+        snapshot: TaskAccountingSnapshot,
+    ) -> None:
+        for name in TaskAccountingSnapshot.model_fields:
+            setattr(state, name, getattr(snapshot, name))
+
+    def accounting_snapshot(
+        self,
+        task_id: str,
+    ) -> TaskAccountingSnapshot:
+        return self.get_state(task_id).accounting_snapshot()
+
+    def record_accounting(
+        self,
+        task_id: str,
+        runtime_seconds: float = 0.0,
+        paused_seconds: float = 0.0,
+        migration_seconds: float = 0.0,
+        compute_cost_usd: float = 0.0,
+        transfer_cost_usd: float = 0.0,
+        compute_carbon_grams: float = 0.0,
+        transfer_carbon_grams: float = 0.0,
+        last_accounted_at_utc: datetime | None = None,
+        estimated_remaining_seconds: float | None = None,
+        progress_completed_units: float | None = None,
+        progress_total_units: float | None = None,
+        progress_fraction: float | None = None,
+        progress_rate_units_per_second: float | None = None,
+        progress_updated_at_utc: datetime | None = None,
+    ) -> TaskRuntimeState:
+        state = self.get_state(task_id)
+
+        state.accumulated_runtime_seconds += max(0.0, runtime_seconds)
+        state.accumulated_paused_seconds += max(0.0, paused_seconds)
+        state.accumulated_migration_seconds += max(0.0, migration_seconds)
+
+        state.accumulated_compute_cost_usd += max(0.0, compute_cost_usd)
+        state.accumulated_transfer_cost_usd += max(0.0, transfer_cost_usd)
+        state.accumulated_cost_usd = (
+            state.accumulated_compute_cost_usd
+            + state.accumulated_transfer_cost_usd
+        )
+
+        state.accumulated_compute_carbon_grams += max(
+            0.0, compute_carbon_grams
+        )
+        state.accumulated_transfer_carbon_grams += max(
+            0.0, transfer_carbon_grams
+        )
+        state.accumulated_carbon_grams = (
+            state.accumulated_compute_carbon_grams
+            + state.accumulated_transfer_carbon_grams
+        )
+
+        if last_accounted_at_utc is not None:
+            state.last_accounted_at_utc = last_accounted_at_utc
+        if estimated_remaining_seconds is not None:
+            state.estimated_remaining_seconds = max(
+                0.0, estimated_remaining_seconds
+            )
+        if progress_completed_units is not None:
+            state.progress_completed_units = progress_completed_units
+        if progress_total_units is not None:
+            state.progress_total_units = progress_total_units
+        if progress_fraction is not None:
+            state.progress_fraction = progress_fraction
+        if progress_rate_units_per_second is not None:
+            state.progress_rate_units_per_second = (
+                progress_rate_units_per_second
+            )
+        if progress_updated_at_utc is not None:
+            state.progress_updated_at_utc = progress_updated_at_utc
+
+        return self.set_state(state)
 
     def set_state(
         self,
@@ -305,12 +422,72 @@ class PersistentTaskRegistry:
                 f"Cannot start completed task {task_id}"
             )
 
+        now = utc_now()
         state.status = TaskStatus.RUNNING
         state.pid = pid
+        state.started_at_utc = state.started_at_utc or now
+        state.last_accounted_at_utc = now
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
         state.last_error = None
         state.last_exit_code = None
         state.next_recovery_at_utc = None
         state.recovery_exhausted = False
+        return self.set_state(state)
+
+    def mark_paused(
+        self,
+        task_id: str,
+        paused_at_utc: datetime,
+        resume_at_utc: datetime,
+        resume_wall_at_utc: datetime,
+        reason: str,
+    ) -> TaskRuntimeState:
+        state = self.get_state(task_id)
+
+        if state.owner_node_id != self._local_node_id:
+            raise RuntimeError(
+                f"Cannot pause {task_id}; owner is "
+                f"{state.owner_node_id}"
+            )
+        if state.status != TaskStatus.RUNNING or state.pid is None:
+            raise RuntimeError(
+                f"Cannot pause {task_id}; status is "
+                f"{state.status.value}"
+            )
+
+        state.status = TaskStatus.PAUSED
+        state.paused_at_utc = paused_at_utc
+        state.resume_at_utc = resume_at_utc
+        state.resume_wall_at_utc = resume_wall_at_utc
+        state.last_pause_at_utc = paused_at_utc
+        state.pause_reason = reason
+        state.pause_count += 1
+        state.last_accounted_at_utc = utc_now()
+        return self.set_state(state)
+
+    def mark_resumed(self, task_id: str) -> TaskRuntimeState:
+        state = self.get_state(task_id)
+
+        if state.owner_node_id != self._local_node_id:
+            raise RuntimeError(
+                f"Cannot resume {task_id}; owner is "
+                f"{state.owner_node_id}"
+            )
+        if state.status != TaskStatus.PAUSED or state.pid is None:
+            raise RuntimeError(
+                f"Cannot resume {task_id}; status is "
+                f"{state.status.value}"
+            )
+
+        state.status = TaskStatus.RUNNING
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
+        state.last_accounted_at_utc = utc_now()
         return self.set_state(state)
 
     def mark_stopped(self, task_id: str) -> TaskRuntimeState:
@@ -321,6 +498,10 @@ class PersistentTaskRegistry:
 
         state.status = TaskStatus.STOPPED
         state.pid = None
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
         state.last_exit_code = None
         return self.set_state(state)
 
@@ -358,6 +539,10 @@ class PersistentTaskRegistry:
         state.last_error = error
         state.last_exit_code = exit_code
         state.last_failure_at_utc = utc_now()
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
         state.next_recovery_at_utc = None
         return self.set_state(state)
 
@@ -429,6 +614,10 @@ class PersistentTaskRegistry:
         state.last_error = None
         state.last_exit_code = exit_code
         state.completed_at_utc = completed_at_utc
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
         state.final_output_manifest_relative_path = (
             manifest_relative_path
         )
@@ -445,6 +634,7 @@ class PersistentTaskRegistry:
         migration_id: str,
         artifact_digests: dict[str, str],
         migration_at_utc: datetime,
+        accounting: TaskAccountingSnapshot | None = None,
     ) -> TaskRuntimeState:
         state = self.get_state(task_id)
 
@@ -458,11 +648,17 @@ class PersistentTaskRegistry:
         state.generation = generation
         state.status = TaskStatus.STOPPED
         state.pid = None
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
         state.last_migration_id = migration_id
         state.last_migration_at_utc = migration_at_utc
         state.last_error = None
         state.last_exit_code = None
         state.artifact_digests = dict(artifact_digests)
+        if accounting is not None:
+            self._apply_accounting_snapshot(state, accounting)
         return self.set_state(state)
 
     def mark_remote(
@@ -486,6 +682,10 @@ class PersistentTaskRegistry:
         state.generation = generation
         state.status = TaskStatus.REMOTE
         state.pid = None
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
         state.last_migration_id = migration_id
         state.last_migration_at_utc = migration_at_utc
         state.last_error = None
@@ -503,6 +703,10 @@ class PersistentTaskRegistry:
         state.generation = generation
         state.status = TaskStatus.STOPPED
         state.pid = None
+        state.paused_at_utc = None
+        state.resume_at_utc = None
+        state.resume_wall_at_utc = None
+        state.pause_reason = None
         state.last_error = error
         state.last_exit_code = None
         return self.set_state(state)
@@ -517,6 +721,7 @@ class PersistentTaskRegistry:
         completed_at_utc: datetime | None = None,
         final_output_manifest_sha256: str | None = None,
         final_output_bytes: int | None = None,
+        accounting: TaskAccountingSnapshot | None = None,
     ) -> bool:
         state = self.get_state(task_id)
 
@@ -533,12 +738,19 @@ class PersistentTaskRegistry:
         state.owner_node_id = owner_node_id
         state.generation = generation
 
+        if accounting is not None:
+            self._apply_accounting_snapshot(state, accounting)
+
         if migration_at_utc is not None:
             state.last_migration_at_utc = migration_at_utc
 
         if status == TaskStatus.COMPLETED:
             state.status = TaskStatus.COMPLETED
             state.pid = None
+            state.paused_at_utc = None
+            state.resume_at_utc = None
+            state.resume_wall_at_utc = None
+            state.pause_reason = None
             state.completed_at_utc = completed_at_utc
             state.final_output_manifest_sha256 = (
                 final_output_manifest_sha256
@@ -548,6 +760,10 @@ class PersistentTaskRegistry:
         elif owner_node_id != self._local_node_id:
             state.status = TaskStatus.REMOTE
             state.pid = None
+            state.paused_at_utc = None
+            state.resume_at_utc = None
+            state.resume_wall_at_utc = None
+            state.pause_reason = None
 
         self.set_state(state)
         return True

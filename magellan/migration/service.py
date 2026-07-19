@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from datetime import datetime
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from magellan.migration.models import (
     OwnershipUpdate,
 )
 from magellan.migration.transfer import RsyncCheckpointTransfer
+from magellan.runtime.accounting import RuntimeAccountingService
 from magellan.runtime.checkpoint import CheckpointManager
 from magellan.runtime.local_process import LocalProcessRuntime
 from magellan.state.persistent_registry import PersistentTaskRegistry
@@ -41,6 +43,7 @@ class MigrationService:
         prefetch_service: ArtifactPrefetchService,
         bid_client: BidClient,
         bid_store: BidStore,
+        accounting_service: RuntimeAccountingService | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -54,6 +57,7 @@ class MigrationService:
         self._prefetch_service = prefetch_service
         self._bid_client = bid_client
         self._bid_store = bid_store
+        self._accounting_service = accounting_service
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, task_id: str) -> asyncio.Lock:
@@ -152,7 +156,14 @@ class MigrationService:
             activated = False
 
             try:
+                missing_artifact_bytes = 0
                 try:
+                    missing_artifact_bytes = (
+                        await self._prefetch_service.missing_bytes(
+                            task_id=task_id,
+                            destination_node_id=destination_node_id,
+                        )
+                    )
                     artifact_bindings = (
                         await self._prefetch_service.prefetch(
                             task_id=task_id,
@@ -169,10 +180,17 @@ class MigrationService:
                     )
                     return False
 
+                if self._accounting_service is not None:
+                    await asyncio.to_thread(
+                        self._accounting_service.settle_task,
+                        task_id,
+                    )
+
                 self._registry.mark_migrating(
                     task_id,
                     migration_id,
                 )
+                downtime_started = time.monotonic()
 
                 print(
                     f"[migration-start] task={task_id} "
@@ -207,6 +225,19 @@ class MigrationService:
                     migration_id,
                 )
 
+                if self._accounting_service is not None:
+                    await asyncio.to_thread(
+                        self._accounting_service.record_migration,
+                        task_id,
+                        destination_node_id,
+                        (
+                            missing_artifact_bytes
+                            + checkpoint_summary.size_bytes
+                        ),
+                        time.monotonic() - downtime_started,
+                        migration_at_utc,
+                    )
+
                 activation_request = MigrationActivationRequest(
                     migration_id=migration_id,
                     bid_id=bid_id,
@@ -216,6 +247,9 @@ class MigrationService:
                     generation=new_generation,
                     migration_at_utc=migration_at_utc,
                     artifacts=artifact_bindings,
+                    accounting=self._registry.accounting_snapshot(
+                        task_id
+                    ),
                 )
 
                 response = await self._client.activate(
@@ -247,6 +281,9 @@ class MigrationService:
                             binding.artifact_id: binding.digest
                             for binding in artifact_bindings
                         },
+                        accounting=self._registry.accounting_snapshot(
+                            task_id
+                        ),
                     )
                 )
 
@@ -443,6 +480,7 @@ class MigrationService:
                     binding.artifact_id: binding.digest
                     for binding in request.artifacts
                 },
+                accounting=request.accounting,
             )
 
             runtime_state = await asyncio.to_thread(

@@ -27,6 +27,7 @@ from magellan.migration.service import MigrationService
 from magellan.migration.transfer import (
     RsyncCheckpointTransfer,
 )
+from magellan.runtime.accounting import RuntimeAccountingService
 from magellan.runtime.clock import MagellanClock
 from magellan.runtime.local_process import (
     LocalProcessRuntime,
@@ -37,6 +38,7 @@ from magellan.state.persistent_registry import (
 
 from magellan.runtime.checkpoint import CheckpointManager
 from magellan.runtime.completion import CompletionManager
+from magellan.runtime.pause import PauseService
 from magellan.runtime.recovery import FailureRecoveryService
 
 from magellan.artifacts.client import ArtifactClient
@@ -71,6 +73,8 @@ class DaemonContext:
     checkpoint_manager: CheckpointManager
     completion_manager: CompletionManager
     recovery_service: FailureRecoveryService
+    pause_service: PauseService
+    accounting_service: RuntimeAccountingService
     artifact_manager: ArtifactManager
     artifact_client: ArtifactClient
     prefetch_service: ArtifactPrefetchService
@@ -196,6 +200,25 @@ def build_daemon_context() -> DaemonContext:
         registry=registry,
     )
 
+    accounting_service = RuntimeAccountingService(
+        local_node=local_node,
+        cluster=cluster,
+        policy=policy,
+        graph=graph,
+        carbon_store=carbon_store,
+        clock=clock,
+        registry=registry,
+    )
+
+    pause_service = PauseService(
+        local_node_id=local_node.id,
+        policy=policy.pause,
+        clock=clock,
+        registry=registry,
+        runtime=runtime,
+        accounting_service=accounting_service,
+    )
+
     runtime.reconcile()
 
     bid_store = BidStore(
@@ -236,6 +259,7 @@ def build_daemon_context() -> DaemonContext:
         checkpoint_manager=checkpoint_manager,
         bid_client=bid_client,
         bid_store=bid_store,
+        accounting_service=accounting_service,
         client=MigrationClient(
             cluster=cluster,
             activation_timeout_seconds=(
@@ -267,6 +291,8 @@ def build_daemon_context() -> DaemonContext:
         checkpoint_manager=checkpoint_manager,
         prefetch_service=prefetch_service,
         broadcaster=broadcaster,
+        pause_service=pause_service,
+        accounting_service=accounting_service,
     )
 
     return DaemonContext(
@@ -286,6 +312,8 @@ def build_daemon_context() -> DaemonContext:
         checkpoint_manager=checkpoint_manager,
         completion_manager=completion_manager,
         recovery_service=recovery_service,
+        pause_service=pause_service,
+        accounting_service=accounting_service,
         artifact_manager=artifact_manager,
         prefetch_service=prefetch_service,
         artifact_client=artifact_client,

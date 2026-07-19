@@ -207,6 +207,40 @@ def interruptible_sleep(seconds: float) -> None:
         )
 
 
+def write_progress(
+    path: Path | None,
+    completed_steps: int,
+    total_steps: int,
+    loss_value: float | None,
+) -> None:
+    if path is None:
+        return
+
+    atomic_json_write(
+        path,
+        {
+            "format_version": 1,
+            "task_id": os.getenv(
+                "MAGELLAN_TASK_ID",
+                "unknown",
+            ),
+            "completed_units": completed_steps,
+            "total_units": total_steps,
+            "updated_at_utc": datetime.now(
+                timezone.utc
+            ).isoformat(),
+            "node_id": os.getenv(
+                "MAGELLAN_NODE_ID",
+                "unknown",
+            ),
+            "details": {
+                "unit": "training-step",
+                "loss": loss_value,
+            },
+        },
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
@@ -217,6 +251,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ready-file",
         required=True,
+    )
+    parser.add_argument(
+        "--progress-file",
+        default=None,
     )
     parser.add_argument(
         "--model",
@@ -328,6 +366,11 @@ def main() -> None:
         args.checkpoint_dir
     ).resolve()
     ready_file = Path(args.ready_file).resolve()
+    progress_file = (
+        Path(args.progress_file).resolve()
+        if args.progress_file is not None
+        else None
+    )
 
     checkpoint_directory.mkdir(
         parents=True,
@@ -458,6 +501,12 @@ def main() -> None:
     )
 
     last_loss: float | None = None
+    write_progress(
+        progress_file,
+        completed_steps,
+        args.max_steps,
+        last_loss,
+    )
 
     while (
         completed_steps < args.max_steps
@@ -494,6 +543,12 @@ def main() -> None:
             completed_steps=completed_steps,
             loss_value=last_loss,
         )
+        write_progress(
+            progress_file,
+            completed_steps,
+            args.max_steps,
+            last_loss,
+        )
 
         interruptible_sleep(
             args.sleep_per_step
@@ -508,6 +563,13 @@ def main() -> None:
         optimizer=optimizer,
         completed_steps=completed_steps,
         loss_value=last_loss,
+    )
+
+    write_progress(
+        progress_file,
+        completed_steps,
+        args.max_steps,
+        last_loss,
     )
 
     natural_completion = (

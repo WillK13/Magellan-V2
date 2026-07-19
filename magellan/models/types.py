@@ -27,10 +27,11 @@ class TaskProfile(BaseModel):
     prestaged_node_ids: set[str] = Field(default_factory=set)
 
     # Optional task-level constraints/state.
-    estimated_remaining_seconds: float | None = Field(default=None, gt=0)
+    estimated_remaining_seconds: float | None = Field(default=None, ge=0)
     accumulated_cost_usd: float = Field(default=0.0, ge=0)
     cost_cap_usd: float | None = Field(default=None, gt=0)
     last_migration_at: datetime | None = None
+    last_pause_at: datetime | None = None
 
 
 class RawActionEstimate(BaseModel):

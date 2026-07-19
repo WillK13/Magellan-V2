@@ -32,6 +32,31 @@ def pid_is_alive(pid: int) -> bool:
         return True
 
 
+def reap_child_if_exited(pid: int) -> bool:
+    """Reap an exited child when this process is still its parent.
+
+    This matters in tests and daemon-reconstruction scenarios where a new
+    ``LocalProcessRuntime`` instance no longer owns the original ``Popen``
+    object. On macOS, ``kill(pid, 0)`` continues to report a zombie child as
+    present until somebody calls ``waitpid``. Without reaping it, shutdown
+    waits for the full timeout and a subsequent process-group ``SIGKILL`` can
+    fail with ``EPERM`` even though the workload has already exited.
+
+    After a real daemon restart, the workload is no longer a child of the new
+    daemon, so ``waitpid`` raises ``ChildProcessError`` and normal PID probing
+    remains in effect.
+    """
+
+    try:
+        waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return False
+    except OSError:
+        return False
+
+    return waited_pid == pid
+
+
 @dataclass(frozen=True)
 class RuntimeReconcileEvent:
     task_id: str
@@ -63,6 +88,7 @@ class LocalProcessRuntime:
     ) -> str:
         completion_file = self._registry.completion_file(task_id)
         output_directory = self._registry.output_directory(task_id)
+        progress_file = self._registry.progress_file(task_id)
 
         return value.format(
             task_id=task_id,
@@ -89,6 +115,11 @@ class LocalProcessRuntime:
                 if output_directory is not None
                 else ""
             ),
+            progress_file=(
+                str(progress_file)
+                if progress_file is not None
+                else ""
+            ),
         )
 
     def start(self, task_id: str) -> TaskRuntimeState:
@@ -113,6 +144,15 @@ class LocalProcessRuntime:
             and pid_is_alive(state.pid)
         ):
             return state
+
+        if (
+            state.status == TaskStatus.PAUSED
+            and state.pid is not None
+            and pid_is_alive(state.pid)
+        ):
+            raise RuntimeError(
+                f"Cannot start paused task {task_id}; resume it instead"
+            )
 
         task_directory = self._registry.task_directory(task_id)
         checkpoint_file = self._registry.checkpoint_file(task_id)
@@ -151,6 +191,10 @@ class LocalProcessRuntime:
         ).resolve()
 
         readiness_file = self._registry.readiness_file(task_id)
+        progress_file = self._registry.progress_file(task_id)
+
+        if progress_file is not None:
+            progress_file.parent.mkdir(parents=True, exist_ok=True)
 
         if readiness_file is not None:
             readiness_file.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +254,93 @@ class LocalProcessRuntime:
 
         return state
 
+    def pause(
+        self,
+        task_id: str,
+        paused_at_utc,
+        resume_at_utc,
+        resume_wall_at_utc,
+        reason: str,
+    ) -> TaskRuntimeState:
+        state = self._registry.get_state(task_id)
+
+        if state.owner_node_id != self._local_node_id:
+            raise RuntimeError(
+                f"Cannot pause {task_id}; owner is "
+                f"{state.owner_node_id}"
+            )
+        if state.status == TaskStatus.PAUSED:
+            return state
+        if (
+            state.status != TaskStatus.RUNNING
+            or state.pid is None
+            or not pid_is_alive(state.pid)
+        ):
+            raise RuntimeError(
+                f"Cannot pause {task_id}; no live running process"
+            )
+
+        try:
+            os.killpg(state.pid, signal.SIGSTOP)
+        except ProcessLookupError as exc:
+            self._registry.mark_failed(
+                task_id,
+                "Process disappeared while pausing",
+            )
+            raise RuntimeError(
+                f"Process disappeared while pausing {task_id}"
+            ) from exc
+
+        paused = self._registry.mark_paused(
+            task_id=task_id,
+            paused_at_utc=paused_at_utc,
+            resume_at_utc=resume_at_utc,
+            resume_wall_at_utc=resume_wall_at_utc,
+            reason=reason,
+        )
+
+        print(
+            f"[runtime-pause] task={task_id} "
+            f"pid={state.pid} resume_at={resume_at_utc.isoformat()} "
+            f"node={self._local_node_id}",
+            flush=True,
+        )
+        return paused
+
+    def resume(self, task_id: str) -> TaskRuntimeState:
+        state = self._registry.get_state(task_id)
+
+        if state.owner_node_id != self._local_node_id:
+            raise RuntimeError(
+                f"Cannot resume {task_id}; owner is "
+                f"{state.owner_node_id}"
+            )
+        if state.status == TaskStatus.RUNNING:
+            return state
+        if state.status != TaskStatus.PAUSED or state.pid is None:
+            raise RuntimeError(
+                f"Cannot resume {task_id}; status is "
+                f"{state.status.value}"
+            )
+        if not pid_is_alive(state.pid):
+            self._registry.mark_failed(
+                task_id,
+                "Paused process is no longer running",
+            )
+            raise RuntimeError(
+                f"Paused process for {task_id} is no longer running"
+            )
+
+        os.killpg(state.pid, signal.SIGCONT)
+        resumed = self._registry.mark_resumed(task_id)
+
+        print(
+            f"[runtime-resume] task={task_id} "
+            f"pid={state.pid} node={self._local_node_id}",
+            flush=True,
+        )
+        return resumed
+
     def stop(self, task_id: str) -> TaskRuntimeState:
         definition = self._registry.get_definition(task_id)
         state = self._registry.get_state(task_id)
@@ -223,6 +354,12 @@ class LocalProcessRuntime:
         pid = state.pid
         process = self._processes.get(task_id)
 
+        if state.status == TaskStatus.PAUSED:
+            try:
+                os.killpg(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+
         try:
             os.killpg(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -234,22 +371,48 @@ class LocalProcessRuntime:
             + definition.runtime.stop_timeout_seconds
         )
 
+        exited = False
+
         if process is not None:
             remaining = max(0.0, deadline - time.monotonic())
 
             try:
                 process.wait(timeout=remaining)
+                exited = True
             except subprocess.TimeoutExpired:
                 pass
+        else:
+            # A reconstructed runtime has no Popen handle. If it is still
+            # running in the same Python parent (as in the restart test), reap
+            # the terminated child directly instead of mistaking its zombie
+            # entry for a live process.
+            exited = reap_child_if_exited(pid)
 
-        while pid_is_alive(pid) and time.monotonic() < deadline:
+        while not exited and time.monotonic() < deadline:
+            if process is None and reap_child_if_exited(pid):
+                exited = True
+                break
+            if not pid_is_alive(pid):
+                exited = True
+                break
             time.sleep(0.1)
 
-        if pid_is_alive(pid):
+        if not exited:
             try:
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
-                pass
+                exited = True
+            except PermissionError:
+                # macOS may return EPERM for a process group whose leader has
+                # already exited but has not yet been reaped. Only suppress the
+                # error after proving that the recorded PID is gone/reaped.
+                if reap_child_if_exited(pid) or not pid_is_alive(pid):
+                    exited = True
+                else:
+                    raise
+
+        if process is None:
+            reap_child_if_exited(pid)
 
         self._processes.pop(task_id, None)
         state = self._registry.mark_stopped(task_id)
@@ -268,7 +431,10 @@ class LocalProcessRuntime:
         for state in self._registry.all_states():
             if (
                 state.owner_node_id != self._local_node_id
-                or state.status != TaskStatus.RUNNING
+                or state.status not in {
+                    TaskStatus.RUNNING,
+                    TaskStatus.PAUSED,
+                }
             ):
                 continue
 

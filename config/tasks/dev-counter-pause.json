@@ -1,6 +1,6 @@
 {
   "profile": {
-    "task_id": "counter-recovery-001",
+    "task_id": "counter-pause-001",
     "workload_type": "counter",
     "current_node_id": "boston",
     "power_kw": 0.1,
@@ -10,9 +10,9 @@
       "boston",
       "virginia"
     ],
-    "estimated_remaining_seconds": 86400,
+    "estimated_remaining_seconds": 120,
     "accumulated_cost_usd": 0,
-    "cost_cap_usd": null,
+    "cost_cap_usd": 0.02,
     "last_migration_at": null
   },
   "runtime": {
@@ -21,20 +21,22 @@
       "--checkpoint-file",
       "{checkpoint_file}",
       "--interval-seconds",
-      "1",
+      "0.25",
+      "--max-value",
+      "240",
+      "--progress-file",
+      "{progress_file}",
       "--completion-file",
       "{completion_file}",
       "--output-dir",
-      "{output_directory}",
-      "--progress-file",
-      "{progress_file}"
+      "{output_directory}"
     ],
     "environment": {},
     "working_directory": ".",
     "checkpoint_relative_path": "checkpoint/counter.json",
-    "stop_timeout_seconds": 10,
+    "progress_relative_path": "runtime/progress.json",
     "completion_relative_path": "runtime/completion.json",
     "output_relative_directory": "output",
-    "progress_relative_path": "runtime/progress.json"
+    "stop_timeout_seconds": 10
   }
 }

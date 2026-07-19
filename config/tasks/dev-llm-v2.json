@@ -22,6 +22,8 @@
       "{checkpoint_directory}",
       "--ready-file",
       "{task_directory}/runtime/ready.json",
+      "--progress-file",
+      "{progress_file}",
       "--dataset-file",
       "{artifacts_directory}/training-dataset/train.txt",
       "--model",
@@ -51,7 +53,8 @@
     "readiness_timeout_seconds": 600,
     "stop_timeout_seconds": 120,
     "completion_relative_path": "runtime/completion.json",
-    "output_relative_directory": "output"
+    "output_relative_directory": "output",
+    "progress_relative_path": "runtime/progress.json"
   },
   "artifacts": [
     {

@@ -167,11 +167,42 @@ def choose_action(
     best_local = min(local_actions, key=lambda action: action.score)
     best_overall = ranked_actions[0]
 
-    if best_overall.action != ActionType.MIGRATE:
+    if best_overall.action == ActionType.PAUSE:
+        continue_action = next(
+            action
+            for action in ranked_actions
+            if action.action == ActionType.CONTINUE
+        )
+
+        if task.last_pause_at is not None:
+            last_pause = pd.Timestamp(task.last_pause_at)
+            if last_pause.tzinfo is None:
+                last_pause = last_pause.tz_localize(timezone.utc)
+            else:
+                last_pause = last_pause.tz_convert("UTC")
+
+            elapsed = (now - last_pause).total_seconds()
+            if elapsed < policy.pause.min_pause_gap_seconds:
+                return DecisionResult(
+                    selected=continue_action,
+                    ranked_actions=ranked_actions,
+                    reason=(
+                        "Pause has the lowest score, but the minimum "
+                        "pause gap has not elapsed"
+                    ),
+                )
+
         return DecisionResult(
             selected=best_overall,
             ranked_actions=ranked_actions,
-            reason="Lowest score is a local action",
+            reason="Pause has the lowest score",
+        )
+
+    if best_overall.action == ActionType.CONTINUE:
+        return DecisionResult(
+            selected=best_overall,
+            ranked_actions=ranked_actions,
+            reason="Continue has the lowest score",
         )
 
     if task.last_migration_at is not None:

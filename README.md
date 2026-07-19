@@ -2,4 +2,7 @@
 
 Decentralized carbon-aware task scheduling and checkpoint migration.
 
-Current milestone: task completion, final-output publication, expiring bid reservations, transactional activation rollback, and bounded checkpoint recovery. See `docs/milestones/task-lifecycle-recovery.md`.
+Current milestone: executable pause/resume, progress-derived remaining time, persistent compute/pause/migration accounting, live cost-cap enforcement, and accounting handoff across ownership changes.
+
+- Implementation and validation: `docs/milestones/pause-runtime-accounting.md`
+- V1-compatible future adaptive weights: `docs/design/adaptive-weights-v2.md`

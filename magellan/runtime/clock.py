@@ -25,6 +25,28 @@ class MagellanClock:
         else:
             self._trace_start_utc = None
 
+    @property
+    def trace_seconds_per_real_second(self) -> float:
+        if self._policy.mode == "wall":
+            return 1.0
+        return self._policy.trace_seconds_per_real_second
+
+    def evaluation_seconds_for_wall_seconds(
+        self,
+        wall_seconds: float,
+    ) -> float:
+        return max(0.0, wall_seconds) * (
+            self.trace_seconds_per_real_second
+        )
+
+    def wall_seconds_for_evaluation_seconds(
+        self,
+        evaluation_seconds: float,
+    ) -> float:
+        return max(0.0, evaluation_seconds) / (
+            self.trace_seconds_per_real_second
+        )
+
     def now(self) -> pd.Timestamp:
         wall_now = pd.Timestamp.now(tz="UTC")
 
