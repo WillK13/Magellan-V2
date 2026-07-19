@@ -16,7 +16,7 @@ from magellan.config.models import (
     ClusterConfig,
     NodeConfig,
 )
-from magellan.config.policy_models import ScoringPolicy
+from magellan.config.policy_models import AuctionPolicy, ScoringPolicy
 from magellan.daemon.scheduler_service import SchedulerService
 from magellan.graph.topology import ClusterGraph
 from magellan.migration.client import (
@@ -154,6 +154,16 @@ def build_daemon_context() -> DaemonContext:
 
     cluster = load_cluster_config(cluster_path)
     policy = load_policy_config(policy_path)
+    auction_override = os.getenv(
+        "MAGELLAN_AUCTION_STRATEGY",
+        "",
+    ).strip()
+    if auction_override:
+        auction = AuctionPolicy.model_validate({
+            **policy.auction.model_dump(),
+            "strategy": auction_override,
+        })
+        policy = policy.model_copy(update={"auction": auction})
     local_node = cluster.get_node(node_id)
 
     task_catalog = TaskCatalogStore(
@@ -249,6 +259,8 @@ def build_daemon_context() -> DaemonContext:
         local_node_id=local_node.id,
         capacity=local_node.capacity,
         bid_window_seconds=cluster.bid_window_seconds,
+        node_resources=local_node.resources,
+        auction_policy=policy.auction,
     )
 
     transfer = RsyncCheckpointTransfer(

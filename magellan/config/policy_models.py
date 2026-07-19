@@ -72,6 +72,33 @@ class ReconciliationPolicy(BaseModel):
         default=1.0, gt=0
     )
 
+
+class AuctionPolicy(BaseModel):
+    """Destination-local ranking policy for task bids."""
+
+    strategy: Literal[
+        "lowest_score",
+        "shortest_remaining",
+        "longest_remaining",
+        "credit_fair",
+        "highest_regret",
+        "priority_deadline",
+        "resource_efficiency",
+    ] = "lowest_score"
+
+    credit_increment: float = Field(default=1.0, gt=0)
+    credit_max: float = Field(default=100.0, gt=0)
+    accepted_credit_decay: float = Field(default=0.0, ge=0, le=1)
+    deadline_urgency_window_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+    )
+    resource_efficiency_floor: float = Field(
+        default=0.01,
+        gt=0,
+    )
+
+
 class ClockPolicy(BaseModel):
     mode: Literal["wall", "trace"]
     trace_start_utc: str | None = None
@@ -88,4 +115,5 @@ class ScoringPolicy(BaseModel):
     reconciliation: ReconciliationPolicy = Field(
         default_factory=ReconciliationPolicy
     )
+    auction: AuctionPolicy = Field(default_factory=AuctionPolicy)
     clock: ClockPolicy

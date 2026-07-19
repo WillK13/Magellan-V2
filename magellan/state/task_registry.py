@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from magellan.models.types import TaskProfile
+from magellan.models.types import TaskProfile, TaskResourceRequest
 
 
 class TaskRegistry:
@@ -59,6 +59,16 @@ class TaskRegistry:
             task.current_node_id == node_id
             for task in self._tasks.values()
         )
+
+    def owned_resource_requests(
+        self,
+        node_id: str,
+    ) -> list[TaskResourceRequest]:
+        return [
+            task.resource_request.model_copy(deep=True)
+            for task in self._tasks.values()
+            if task.current_node_id == node_id
+        ]
 
     def get(self, task_id: str) -> TaskProfile:
         try:

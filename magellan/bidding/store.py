@@ -29,6 +29,7 @@ class BidStore:
     ) -> None:
         self._state_file = Path(state_file) if state_file is not None else None
         self._records: dict[str, BidRecord] = {}
+        self._credits: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._reservation_ttl_seconds = reservation_ttl_seconds
         self._load()
@@ -37,8 +38,19 @@ class BidStore:
         if self._state_file is None or not self._state_file.is_file():
             return
         raw = json.loads(self._state_file.read_text(encoding="utf-8"))
-        records = [BidRecord.model_validate(item) for item in raw]
+        if isinstance(raw, list):
+            # Backward compatibility with pre-auction bid stores.
+            record_values = raw
+            credit_values = {}
+        else:
+            record_values = raw.get("records", [])
+            credit_values = raw.get("credits", {})
+        records = [BidRecord.model_validate(item) for item in record_values]
         self._records = {record.bid_id: record for record in records}
+        self._credits = {
+            str(task_id): max(0.0, float(value))
+            for task_id, value in credit_values.items()
+        }
 
     def _persist_locked(self) -> None:
         if self._state_file is None:
@@ -47,7 +59,13 @@ class BidStore:
         temporary = self._state_file.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(
-                [record.model_dump(mode="json") for record in self._records.values()],
+                {
+                    "records": [
+                        record.model_dump(mode="json")
+                        for record in self._records.values()
+                    ],
+                    "credits": dict(sorted(self._credits.items())),
+                },
                 indent=2,
             ),
             encoding="utf-8",
@@ -139,6 +157,15 @@ class BidStore:
             key=lambda record: record.received_at_utc,
         )
 
+    async def active_reservations(self) -> list[BidRecord]:
+        async with self._lock:
+            self._expire_locked(datetime.now(timezone.utc))
+            return [
+                record.model_copy(deep=True)
+                for record in self._records.values()
+                if record.status in _ACTIVE_RESERVATION_STATUSES
+            ]
+
     async def active_reservation_count(self) -> int:
         async with self._lock:
             self._expire_locked(datetime.now(timezone.utc))
@@ -162,6 +189,12 @@ class BidStore:
         status: BidStatus,
         reason: str,
         now_utc: datetime | None = None,
+        *,
+        auction_strategy=None,
+        auction_rank: int | None = None,
+        auction_credit_before: float = 0.0,
+        resource_fit: bool | None = None,
+        auction_metrics: dict | None = None,
     ) -> BidRecord:
         if status not in {
             BidStatus.ACCEPTED,
@@ -189,6 +222,17 @@ class BidStore:
             record.status = status
             record.decided_at_utc = now
             record.decision_reason = reason
+            record.auction_strategy = auction_strategy
+            record.auction_rank = auction_rank
+            record.auction_credit_before = max(
+                0.0,
+                auction_credit_before,
+            )
+            record.auction_credit_after = (
+                record.auction_credit_before
+            )
+            record.resource_fit = resource_fit
+            record.auction_metrics = dict(auction_metrics or {})
 
             if status == BidStatus.ACCEPTED:
                 record.reservation_expires_at_utc = (
@@ -330,3 +374,56 @@ class BidStore:
             record.decision_reason = reason
             self._persist_locked()
             return record.model_copy(deep=True)
+
+    async def credits_snapshot(self) -> dict[str, float]:
+        async with self._lock:
+            return dict(self._credits)
+
+    async def credit_for(self, task_id: str) -> float:
+        async with self._lock:
+            return self._credits.get(task_id, 0.0)
+
+    async def apply_credit_outcomes(
+        self,
+        accepted_bid_ids: set[str],
+        rejected_competition_bid_ids: set[str],
+        *,
+        increment: float,
+        maximum: float,
+        accepted_decay: float,
+    ) -> None:
+        """Persist destination-specific fairness credit after an auction.
+
+        Only feasible tasks that lost to competing demand earn credit.
+        Incompatible or oversized tasks do not gain priority merely by
+        repeatedly submitting an impossible request.
+        """
+        async with self._lock:
+            for bid_id in accepted_bid_ids:
+                record = self._records.get(bid_id)
+                if record is None:
+                    continue
+                before = self._credits.get(record.task_id, 0.0)
+                after = max(0.0, before * accepted_decay)
+                self._credits[record.task_id] = after
+                record.auction_credit_after = after
+
+            for bid_id in rejected_competition_bid_ids:
+                record = self._records.get(bid_id)
+                if record is None:
+                    continue
+                before = self._credits.get(record.task_id, 0.0)
+                after = min(maximum, before + increment)
+                self._credits[record.task_id] = after
+                record.auction_credit_after = after
+
+            touched = accepted_bid_ids | rejected_competition_bid_ids
+            for bid_id in touched:
+                record = self._records.get(bid_id)
+                if record is not None and record.auction_credit_after == 0.0:
+                    record.auction_credit_after = self._credits.get(
+                        record.task_id,
+                        0.0,
+                    )
+
+            self._persist_locked()

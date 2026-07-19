@@ -102,7 +102,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.6.0",
+    version="0.7.0",
     lifespan=lifespan,
 )
 
@@ -113,6 +113,7 @@ async def health() -> dict:
     active_reservations = (
         await context.bid_store.active_reservation_count()
     )
+    auction_status = await context.bid_arbiter.status()
 
     return {
         "status": "ok",
@@ -123,6 +124,13 @@ async def health() -> dict:
         "internal_ip": str(context.local_node.internal_ip),
         "carbon_region": context.local_node.carbon_region,
         "capacity": context.local_node.capacity,
+        "auction_strategy": auction_status["strategy"],
+        "available_task_slots": auction_status[
+            "available_task_slots"
+        ],
+        "resource_capacity": auction_status[
+            "resource_capacity"
+        ],
         "owned_task_count": context.registry.count_owned(
             context.local_node.id
         ),
@@ -266,6 +274,11 @@ async def get_task_run(run_id: str) -> TaskRunView:
 @app.get("/catalog/snapshot", response_model=TaskCatalogSnapshot)
 async def catalog_snapshot() -> TaskCatalogSnapshot:
     return context.task_catalog.snapshot()
+
+@app.get("/auction/status")
+async def auction_status() -> dict:
+    return await context.bid_arbiter.status()
+
 
 @app.post("/bids", response_model=BidRecord)
 async def submit_bid(

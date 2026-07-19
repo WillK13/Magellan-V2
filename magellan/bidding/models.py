@@ -9,6 +9,16 @@ from pydantic import BaseModel, Field, model_validator
 from magellan.models.types import ActionType, ScoredAction, TaskResourceRequest
 
 
+class AuctionStrategy(str, Enum):
+    LOWEST_SCORE = "lowest_score"
+    SHORTEST_REMAINING = "shortest_remaining"
+    LONGEST_REMAINING = "longest_remaining"
+    CREDIT_FAIR = "credit_fair"
+    HIGHEST_REGRET = "highest_regret"
+    PRIORITY_DEADLINE = "priority_deadline"
+    RESOURCE_EFFICIENCY = "resource_efficiency"
+
+
 class BidStatus(str, Enum):
     PENDING = "pending"
     ACCEPTED = "accepted"
@@ -31,6 +41,13 @@ class TaskBidContext(BaseModel):
     resource_request: TaskResourceRequest = Field(
         default_factory=TaskResourceRequest
     )
+
+    # The best action available if this destination rejects the task.
+    # A larger opportunity loss means rejection is more harmful.
+    fallback_action: ActionType | None = None
+    fallback_destination_node_id: str | None = None
+    fallback_score: float | None = Field(default=None, ge=0)
+    opportunity_loss: float = Field(default=0.0, ge=0)
 
 
 class BidRequest(BaseModel):
@@ -78,3 +95,13 @@ class BidRecord(BidRequest):
     reservation_expires_at_utc: datetime | None = None
     activation_started_at_utc: datetime | None = None
     consumed_at_utc: datetime | None = None
+
+    auction_strategy: AuctionStrategy | None = None
+    auction_rank: int | None = Field(default=None, ge=1)
+    auction_credit_before: float = Field(default=0.0, ge=0)
+    auction_credit_after: float = Field(default=0.0, ge=0)
+    resource_fit: bool | None = None
+    auction_metrics: dict[
+        str,
+        float | int | str | bool | None,
+    ] = Field(default_factory=dict)

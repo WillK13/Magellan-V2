@@ -30,18 +30,6 @@ class RsyncArtifactTransfer:
         migration_id: str,
     ) -> None:
         destination = self._cluster.get_node(
-            destinationremote_state_root = Path(
-                remote_state_root
-            )
-        )
-
-    def send(
-        self,
-        digest: str,
-        destination_node_id: str,
-        migration_id: str,
-    ) -> None:
-        destination = self._cluster.get_node(
             destination_node_id
         )
 

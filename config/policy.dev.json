@@ -41,5 +41,13 @@
     "scan_interval_seconds": 1,
     "activation_resolution_timeout_seconds": 8,
     "activation_resolution_poll_seconds": 0.5
+  },
+  "auction": {
+    "strategy": "lowest_score",
+    "credit_increment": 1.0,
+    "credit_max": 100.0,
+    "accepted_credit_decay": 0.0,
+    "deadline_urgency_window_seconds": 3600.0,
+    "resource_efficiency_floor": 0.01
   }
 }

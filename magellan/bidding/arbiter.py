@@ -4,21 +4,40 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
-from magellan.bidding.models import BidStatus
+from magellan.bidding.models import (
+    AuctionStrategy,
+    BidRecord,
+    BidStatus,
+)
+from magellan.bidding.ranking import rank_bids
+from magellan.bidding.resources import (
+    ResourceLedger,
+    sum_requests,
+)
 from magellan.bidding.store import BidStore
+from magellan.config.models import NodeResourceCapacity
+from magellan.config.policy_models import AuctionPolicy
+from magellan.models.types import TaskResourceRequest
 
 
 class CapacityRegistry(Protocol):
     def count_owned(self, node_id: str) -> int:
         ...
 
+    def owned_resource_requests(
+        self,
+        node_id: str,
+    ) -> list[TaskResourceRequest]:
+        ...
+
 
 class BidArbiter:
-    """
-    Destination-local auction for task bids. Tasks compete for this
-    node's scarce capacity; the node never bids for tasks. During each
-    fixed window, the arbiter accepts the lowest scheduling scores up
-    to available capacity. Accepted task bids become expiring leases.
+    """Destination-local auction for task bids.
+
+    Tasks compete for this node's scarce capacity; the node never bids
+    for tasks. The selected policy ranks bids within a fixed window, while
+    admission always enforces task slots and configured CPU, memory, GPU,
+    and accelerator constraints.
     """
 
     def __init__(
@@ -28,12 +47,78 @@ class BidArbiter:
         local_node_id: str,
         capacity: int,
         bid_window_seconds: float,
+        node_resources: NodeResourceCapacity | None = None,
+        auction_policy: AuctionPolicy | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
         self._local_node_id = local_node_id
         self._capacity = capacity
         self._bid_window_seconds = bid_window_seconds
+        self._node_resources = (
+            node_resources or NodeResourceCapacity()
+        )
+        self._auction_policy = auction_policy or AuctionPolicy()
+        self._strategy = AuctionStrategy(
+            self._auction_policy.strategy
+        )
+
+    @property
+    def strategy(self) -> AuctionStrategy:
+        return self._strategy
+
+    def _owned_requests(self) -> list[TaskResourceRequest]:
+        method = getattr(
+            self._registry,
+            "owned_resource_requests",
+            None,
+        )
+        if method is None:
+            return []
+        return method(self._local_node_id)
+
+    @staticmethod
+    def _request(record: BidRecord) -> TaskResourceRequest:
+        if record.task_context is None:
+            return TaskResourceRequest()
+        return record.task_context.resource_request
+
+    async def _available_resources(
+        self,
+    ) -> tuple[int, ResourceLedger]:
+        currently_owned = self._registry.count_owned(
+            self._local_node_id
+        )
+        reservations = await self._store.active_reservations()
+        available_slots = max(
+            0,
+            self._capacity
+            - currently_owned
+            - len(reservations),
+        )
+        used_requests = self._owned_requests() + [
+            self._request(record)
+            for record in reservations
+        ]
+        ledger = ResourceLedger.from_capacity(
+            self._node_resources,
+            used=sum_requests(used_requests),
+        )
+        return available_slots, ledger
+
+    async def status(self) -> dict:
+        available_slots, ledger = await self._available_resources()
+        return {
+            "node_id": self._local_node_id,
+            "strategy": self._strategy.value,
+            "task_slot_capacity": self._capacity,
+            "available_task_slots": available_slots,
+            "resource_capacity": self._node_resources.model_dump(
+                mode="json"
+            ),
+            **ledger.snapshot(),
+            "credits": await self._store.credits_snapshot(),
+        }
 
     async def run_once(
         self,
@@ -67,68 +152,119 @@ class BidArbiter:
             for bid in pending
             if bid.received_at_utc <= window_end
         ]
-
-        ranked = sorted(
-            window_bids,
-            key=lambda bid: (
-                bid.candidate.score,
-                bid.received_at_utc,
-                bid.bid_id,
-            ),
+        credits = await self._store.credits_snapshot()
+        ranked = rank_bids(
+            bids=window_bids,
+            strategy=self._strategy,
+            credits=credits,
+            node_resources=self._node_resources,
+            policy=self._auction_policy,
+            now_utc=now,
+        )
+        available_slots, ledger = await self._available_resources()
+        full_ledger = ResourceLedger.from_capacity(
+            self._node_resources
         )
 
-        currently_owned = self._registry.count_owned(
-            self._local_node_id
-        )
-        active_reservations = (
-            await self._store.active_reservation_count()
-        )
-        available_slots = max(
-            0,
-            self._capacity
-            - currently_owned
-            - active_reservations,
-        )
+        accepted_ids: set[str] = set()
+        competition_rejected_ids: set[str] = set()
+        selected_task_ids: set[str] = set()
 
-        winner_ids = {
-            bid.bid_id
-            for bid in ranked[:available_slots]
-        }
+        for rank, item in enumerate(ranked, start=1):
+            bid = item.bid
+            request = self._request(bid)
+            individually_feasible, infeasible_reason = (
+                full_ledger.compatible(request)
+            )
+            status = BidStatus.REJECTED
+            resource_fit = individually_feasible
+            earns_credit = False
 
-        for bid in ranked:
-            if bid.bid_id in winner_ids:
-                status = BidStatus.ACCEPTED
+            if bid.task_id in selected_task_ids:
                 reason = (
-                    "Lowest score within the bid window and "
-                    "destination capacity is reserved"
+                    "Duplicate bid for a task already selected in "
+                    "this auction window"
                 )
+            elif not individually_feasible:
+                reason = infeasible_reason or (
+                    "Task resource request is incompatible with "
+                    "destination capacity"
+                )
+            elif available_slots <= 0:
+                reason = (
+                    "Destination task slots are already owned or reserved"
+                )
+                earns_credit = True
             else:
-                status = BidStatus.REJECTED
-
-                if available_slots == 0:
-                    reason = (
-                        "Destination has no unreserved capacity"
+                fits_remaining, contention_reason = ledger.compatible(
+                    request
+                )
+                if not fits_remaining:
+                    reason = contention_reason or (
+                        "Destination resources are already owned or reserved"
                     )
+                    earns_credit = True
                 else:
+                    status = BidStatus.ACCEPTED
                     reason = (
-                        "Another bid had a lower scheduling score"
+                        f"Selected by {self._strategy.value} task auction; "
+                        "destination resources are reserved"
                     )
+                    available_slots -= 1
+                    ledger.consume(request)
+                    accepted_ids.add(bid.bid_id)
+                    selected_task_ids.add(bid.task_id)
 
-            decided = await self._store.decide(
+            if status == BidStatus.REJECTED and earns_credit:
+                competition_rejected_ids.add(bid.bid_id)
+
+            await self._store.decide(
                 bid_id=bid.bid_id,
                 status=status,
                 reason=reason,
                 now_utc=now,
+                auction_strategy=self._strategy,
+                auction_rank=rank,
+                auction_credit_before=credits.get(
+                    bid.task_id,
+                    0.0,
+                ),
+                resource_fit=resource_fit,
+                auction_metrics={
+                    **item.metrics,
+                    "requested_cpu_cores": request.cpu_cores,
+                    "requested_memory_mb": request.memory_mb,
+                    "requested_gpu_count": request.gpu_count,
+                },
             )
 
+        await self._store.apply_credit_outcomes(
+            accepted_bid_ids=accepted_ids,
+            rejected_competition_bid_ids=(
+                competition_rejected_ids
+            ),
+            increment=self._auction_policy.credit_increment,
+            maximum=self._auction_policy.credit_max,
+            accepted_decay=(
+                self._auction_policy.accepted_credit_decay
+            ),
+        )
+
+        for item in ranked:
+            decided = await self._store.get(item.bid.bid_id)
+            assert decided is not None
             print(
-                f"[arbiter] node={self._local_node_id} "
+                f"[task-auction] node={self._local_node_id} "
+                f"strategy={self._strategy.value} "
+                f"rank={decided.auction_rank} "
                 f"bid={decided.bid_id} "
                 f"task={decided.task_id} "
                 f"source={decided.source_node_id} "
                 f"score={decided.candidate.score:.6f} "
+                f"credit={decided.auction_credit_before:.2f}->"
+                f"{decided.auction_credit_after:.2f} "
                 f"status={decided.status.value} "
-                f"expires={decided.reservation_expires_at_utc}",
+                f"reason={decided.decision_reason}",
                 flush=True,
             )
 

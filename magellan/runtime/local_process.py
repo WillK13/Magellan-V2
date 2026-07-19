@@ -11,7 +11,6 @@ from pathlib import Path
 from magellan.artifacts.manager import ArtifactManager
 from magellan.runtime.completion import (
     CompletionManager,
-    CompletionValidationError,
 )
 from magellan.state.persistent_registry import (
     PersistentTaskRegistry,

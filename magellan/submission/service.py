@@ -7,7 +7,6 @@ from magellan.submission.catalog import TaskCatalogStore
 from magellan.submission.models import (
     TaskDefinitionRecord,
     TaskDefinitionSubmission,
-    TaskRunRecord,
     TaskRunSubmission,
     TaskRunView,
 )

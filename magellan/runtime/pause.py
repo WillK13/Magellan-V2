@@ -9,7 +9,6 @@ from magellan.config.policy_models import PausePolicy
 from magellan.runtime.clock import MagellanClock
 from magellan.runtime.local_process import LocalProcessRuntime
 from magellan.state.persistent_registry import PersistentTaskRegistry
-from magellan.state.task_models import TaskStatus
 
 
 class PauseService:

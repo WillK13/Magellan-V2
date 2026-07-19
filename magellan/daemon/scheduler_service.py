@@ -86,7 +86,35 @@ class SchedulerService:
         self,
         task,
         static_data_bytes: int,
+        candidate=None,
+        ranked_actions=None,
     ) -> TaskBidContext:
+        fallback = None
+        if candidate is not None and ranked_actions is not None:
+            alternatives = [
+                action
+                for action in ranked_actions
+                if not (
+                    action.action == candidate.action
+                    and action.destination_node_id
+                    == candidate.destination_node_id
+                    and action.source_node_id
+                    == candidate.source_node_id
+                )
+            ]
+            if alternatives:
+                fallback = min(
+                    alternatives,
+                    key=lambda action: action.score,
+                )
+
+        opportunity_loss = 0.0
+        if fallback is not None and candidate is not None:
+            opportunity_loss = max(
+                0.0,
+                fallback.score - candidate.score,
+            )
+
         return TaskBidContext(
             workload_type=task.workload_type,
             priority=task.priority,
@@ -97,6 +125,18 @@ class SchedulerService:
             accumulated_cost_usd=task.accumulated_cost_usd,
             cost_cap_usd=task.cost_cap_usd,
             resource_request=task.resource_request,
+            fallback_action=(
+                fallback.action if fallback is not None else None
+            ),
+            fallback_destination_node_id=(
+                fallback.destination_node_id
+                if fallback is not None
+                else None
+            ),
+            fallback_score=(
+                fallback.score if fallback is not None else None
+            ),
+            opportunity_loss=opportunity_loss,
         )
 
     def _task_operation_lock(self, task_id: str) -> asyncio.Lock:
@@ -274,6 +314,8 @@ class SchedulerService:
                     selected.destination_node_id,
                     0,
                 ),
+                candidate=selected,
+                ranked_actions=decision.ranked_actions,
             ),
             source_node_id=self._local_node.id,
             destination_node_id=selected.destination_node_id,
@@ -493,6 +535,8 @@ class SchedulerService:
             task_context=self._task_bid_context(
                 task,
                 missing_bytes,
+                candidate=candidate,
+                ranked_actions=decision.ranked_actions,
             ),
             source_node_id=self._local_node.id,
             destination_node_id=destination_node_id,

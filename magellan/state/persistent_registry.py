@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterable
 
-from magellan.models.types import TaskProfile
+from magellan.models.types import TaskProfile, TaskResourceRequest
 from magellan.state.task_models import (
     TaskAccountingSnapshot,
     TaskDefinition,
@@ -273,6 +273,25 @@ class PersistentTaskRegistry:
             and state.status in _CAPACITY_STATUSES
             for state in self.all_states()
         )
+
+    def owned_resource_requests(
+        self,
+        node_id: str,
+    ) -> list[TaskResourceRequest]:
+        requests: list[TaskResourceRequest] = []
+        for state in self.all_states():
+            if (
+                state.owner_node_id != node_id
+                or state.status not in _CAPACITY_STATUSES
+            ):
+                continue
+            definition = self.get_definition(state.task_id)
+            requests.append(
+                definition.profile.resource_request.model_copy(
+                    deep=True
+                )
+            )
+        return requests
 
     def running_owned_task_ids(
         self,

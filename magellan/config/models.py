@@ -15,6 +15,21 @@ class NetworkEdgeConfig(BaseModel):
     latency_ms: float = Field(ge=0)
 
 
+class NodeResourceCapacity(BaseModel):
+    """Physical resources available for task reservations on one node.
+
+    A null limit means the resource is not enforced. ``capacity`` on
+    ``NodeConfig`` remains the maximum number of simultaneously owned or
+    reserved tasks, while this model prevents CPU, memory, and accelerator
+    overcommit inside that task-count limit.
+    """
+
+    cpu_cores: float | None = Field(default=None, gt=0)
+    memory_mb: int | None = Field(default=None, gt=0)
+    gpu_count: int | None = Field(default=None, ge=0)
+    accelerator_types: set[str] = Field(default_factory=set)
+
+
 class NodeConfig(BaseModel):
     # Magellan identity
     id: str = Field(min_length=1)
@@ -33,6 +48,9 @@ class NodeConfig(BaseModel):
 
     # Site properties
     capacity: int = Field(default=1, ge=1)
+    resources: NodeResourceCapacity = Field(
+        default_factory=NodeResourceCapacity
+    )
     pue: float = Field(default=1.2, ge=1)
     compute_price_usd_per_hour: float = Field(default=0.0, ge=0)
     egress_price_usd_per_gb: float = Field(default=0.0, ge=0)
