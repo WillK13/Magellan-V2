@@ -16,3 +16,4 @@ artifacts/
 
 datasets/*.csv
 !datasets/README.md
+*.egg-info/
