@@ -78,8 +78,37 @@ class SchedulerService:
         self._pause_service = pause_service
         self._accounting_service = accounting_service
         self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
+        self._task_operation_locks: dict[str, asyncio.Lock] = {}
+
+    def _task_operation_lock(self, task_id: str) -> asyncio.Lock:
+        """Serialize scheduler and operator actions for one task."""
+        return self._task_operation_locks.setdefault(
+            task_id,
+            asyncio.Lock(),
+        )
 
     async def _evaluate_task(
+        self,
+        task_id: str,
+        trace_time,
+    ) -> None:
+        async with self._task_operation_lock(task_id):
+            state = self._registry.get_state(task_id)
+            if (
+                state.owner_node_id != self._local_node.id
+                or state.status != TaskStatus.RUNNING
+            ):
+                print(
+                    f"[scheduler-skip] task={task_id} "
+                    f"owner={state.owner_node_id} "
+                    f"status={state.status.value}",
+                    flush=True,
+                )
+                return
+
+            await self._evaluate_task_locked(task_id, trace_time)
+
+    async def _evaluate_task_locked(
         self,
         task_id: str,
         trace_time,
@@ -258,6 +287,19 @@ class SchedulerService:
         idle_seconds: float | None = None,
         reason: str = "Operator requested pause",
     ) -> dict:
+        async with self._task_operation_lock(task_id):
+            return await self._request_pause_locked(
+                task_id=task_id,
+                idle_seconds=idle_seconds,
+                reason=reason,
+            )
+
+    async def _request_pause_locked(
+        self,
+        task_id: str,
+        idle_seconds: float | None,
+        reason: str,
+    ) -> dict:
         state = self._registry.get_state(task_id)
         if state.owner_node_id != self._local_node.id:
             raise RuntimeError(
@@ -298,6 +340,10 @@ class SchedulerService:
         return paused.model_dump(mode="json")
 
     async def request_resume(self, task_id: str) -> dict:
+        async with self._task_operation_lock(task_id):
+            return await self._request_resume_locked(task_id)
+
+    async def _request_resume_locked(self, task_id: str) -> dict:
         state = self._registry.get_state(task_id)
         if state.owner_node_id != self._local_node.id:
             raise RuntimeError(
@@ -323,7 +369,30 @@ class SchedulerService:
         destination_node_id: str,
     ) -> dict:
         """Operator-triggered migration that still uses scoring and bidding."""
+        async with self._task_operation_lock(task_id):
+            return await self._request_migration_locked(
+                task_id=task_id,
+                destination_node_id=destination_node_id,
+            )
+
+    async def _request_migration_locked(
+        self,
+        task_id: str,
+        destination_node_id: str,
+    ) -> dict:
         state = self._registry.get_state(task_id)
+
+        # A background scheduler epoch may have won the per-task lock and
+        # completed this exact migration while the operator request waited.
+        # Treat that outcome as idempotent success instead of submitting a
+        # duplicate bid or reporting a misleading conflict.
+        if state.owner_node_id == destination_node_id:
+            return {
+                "bid": None,
+                "migrated": True,
+                "already_migrated": True,
+                "state": state.model_dump(mode="json"),
+            }
 
         if state.owner_node_id != self._local_node.id:
             raise RuntimeError(

@@ -86,7 +86,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.4.1",
+    version="0.4.2",
     lifespan=lifespan,
 )
 
