@@ -18,3 +18,7 @@ datasets/*.csv
 !datasets/README.md
 
 *.egg-info/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
