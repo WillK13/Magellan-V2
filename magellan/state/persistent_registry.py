@@ -234,8 +234,8 @@ class PersistentTaskRegistry:
             existing = self._definitions.get(task_id)
             if existing is not None:
                 if (
-                    existing.model_dump(mode="json")
-                    != definition.model_dump(mode="json")
+                    existing.model_dump(mode="python")
+                    != definition.model_dump(mode="python")
                 ):
                     raise RuntimeError(
                         f"Conflicting task definition for {task_id}"

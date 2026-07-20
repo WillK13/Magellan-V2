@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from enum import Enum
 from hashlib import sha256
 import json
+from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -16,12 +19,45 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _canonical_json_value(value: Any) -> Any:
+    """Convert a model payload into a deterministic JSON-compatible value."""
+    if isinstance(value, BaseModel):
+        return _canonical_json_value(value.model_dump(mode="python"))
+    if isinstance(value, Enum):
+        return _canonical_json_value(value.value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (set, frozenset)):
+        items = [_canonical_json_value(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ),
+        )
+    if isinstance(value, (list, tuple)):
+        return [_canonical_json_value(item) for item in value]
+    return value
+
+
 def canonical_digest(value: BaseModel | dict) -> str:
-    payload = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+    payload = _canonical_json_value(value)
     encoded = json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
 

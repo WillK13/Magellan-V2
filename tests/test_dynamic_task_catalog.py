@@ -9,6 +9,7 @@ from magellan.submission.models import (
     TaskDefinitionSubmission,
     TaskRunSubmission,
     TaskTemplateProfile,
+    canonical_digest,
 )
 
 
@@ -35,6 +36,19 @@ def definition(interval: str = "0.1") -> TaskDefinitionSubmission:
         ),
     )
 
+
+
+def test_canonical_digest_is_stable_for_unordered_sets() -> None:
+    left = {
+        "nodes": {"boston", "virginia"},
+        "nested": {"commands": {"python3", "rsync"}},
+    }
+    right = {
+        "nested": {"commands": {"rsync", "python3"}},
+        "nodes": {"virginia", "boston"},
+    }
+
+    assert canonical_digest(left) == canonical_digest(right)
 
 def test_definition_is_immutable_and_changed_payload_creates_revision(tmp_path) -> None:
     catalog = TaskCatalogStore(tmp_path, "boston")
