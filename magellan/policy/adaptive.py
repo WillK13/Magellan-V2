@@ -100,6 +100,7 @@ class AdaptivePolicyService:
         estimates: list[RawActionEstimate],
         at_utc: datetime,
         telemetry_confidence: float,
+        carbon_forecast_confidence: float,
     ) -> AdaptationSignals:
         budget_slack: float | None = None
         cost_cap_exhausted = False
@@ -154,6 +155,11 @@ class AdaptivePolicyService:
             deadline_slack_ratio=deadline_slack_ratio,
             carbon_opportunity_fraction=carbon_opportunity,
             telemetry_confidence=_clamp(telemetry_confidence, 0.0, 1.0),
+            carbon_forecast_confidence=_clamp(
+                carbon_forecast_confidence,
+                0.0,
+                1.0,
+            ),
             cost_cap_exhausted=cost_cap_exhausted,
             deadline_at_risk=deadline_at_risk,
         )
@@ -181,9 +187,18 @@ class AdaptivePolicyService:
         if signals.budget_slack_fraction is not None:
             cost_pressure = 1.0 - signals.budget_slack_fraction
 
+        power_confidence = max(
+            signals.telemetry_confidence,
+            self.policy.confidence_floor,
+        )
+        forecast_confidence = max(
+            signals.carbon_forecast_confidence,
+            self.policy.confidence_floor,
+        )
+        combined_confidence = (power_confidence * forecast_confidence) ** 0.5
         carbon_signal = (
             signals.carbon_opportunity_fraction
-            * max(signals.telemetry_confidence, self.policy.confidence_floor)
+            * combined_confidence
         )
 
         multipliers = WeightMultipliers(
@@ -205,6 +220,7 @@ class AdaptivePolicyService:
         at_utc: datetime,
         *,
         telemetry_confidence: float = 0.0,
+        carbon_forecast_confidence: float = 0.0,
         hard_constraints: dict[str, bool | float | str | None] | None = None,
     ) -> AdaptiveDecisionContext:
         state = self._state_for(task.task_id)
@@ -214,6 +230,7 @@ class AdaptivePolicyService:
             estimates,
             at_utc,
             telemetry_confidence,
+            carbon_forecast_confidence,
         )
         if self.policy.enabled:
             multipliers, effective = self._adapt(

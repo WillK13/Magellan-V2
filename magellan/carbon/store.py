@@ -5,6 +5,11 @@ from pathlib import Path
 import pandas as pd
 
 from magellan.config.models import ClusterConfig
+from magellan.config.policy_models import CarbonForecastPolicy
+from magellan.carbon.forecast import (
+    CarbonForecastEstimate,
+    LinearTrendForecastProvider,
+)
 
 
 TIME_COLUMN = "Datetime (UTC)"
@@ -140,3 +145,36 @@ class CarbonStore:
         )
 
         return float(interpolated.reindex(sample_index).mean())
+    def forecast(
+        self,
+        *,
+        node_id: str,
+        observed_at_utc: str | pd.Timestamp,
+        forecast_start_utc: str | pd.Timestamp,
+        duration_seconds: float,
+        policy: CarbonForecastPolicy,
+    ) -> CarbonForecastEstimate:
+        if duration_seconds < 0:
+            raise ValueError("duration_seconds must be non-negative")
+        provider = LinearTrendForecastProvider()
+        node = self._cluster.get_node(node_id)
+        effective_policy = policy
+        if (
+            policy.configured_fallback_g_per_kwh is None
+            and node.carbon_fallback_g_per_kwh is not None
+        ):
+            effective_policy = policy.model_copy(
+                update={
+                    "configured_fallback_g_per_kwh": (
+                        node.carbon_fallback_g_per_kwh
+                    )
+                }
+            )
+        return provider.forecast(
+            node_id=node_id,
+            series=self._series_by_node_id[node_id],
+            observed_at_utc=as_utc_timestamp(observed_at_utc),
+            forecast_start_utc=as_utc_timestamp(forecast_start_utc),
+            duration_seconds=duration_seconds,
+            policy=effective_policy,
+        )

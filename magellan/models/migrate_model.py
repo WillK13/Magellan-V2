@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
+from magellan.carbon.forecast import forecast_or_average
 from magellan.carbon.store import CarbonStore
 from magellan.config.models import NodeConfig
 from magellan.config.policy_models import (
+    CarbonForecastPolicy,
     MigrationPolicy,
     PausePolicy,
 )
@@ -32,6 +34,7 @@ def estimate_migrate(
     pause_policy: PausePolicy,
     migration_policy: MigrationPolicy,
     static_data_bytes_override: int | None = None,
+    forecast_policy: CarbonForecastPolicy | None = None,
 ) -> RawActionEstimate:
     compute_seconds = horizon_seconds
 
@@ -42,20 +45,15 @@ def estimate_migrate(
         )
 
     if static_data_bytes_override is not None:
-        static_data_bytes = (
-            static_data_bytes_override
-        )
+        static_data_bytes = static_data_bytes_override
     else:
         static_data_bytes = (
             0
             if destination.id in task.prestaged_node_ids
             else task.data_bytes
-    )
+        )
 
-    total_transfer_bytes = (
-        task.checkpoint_bytes
-        + static_data_bytes
-    )
+    total_transfer_bytes = task.checkpoint_bytes + static_data_bytes
 
     transfer_duration_seconds = transfer_seconds(
         size_bytes=total_transfer_bytes,
@@ -74,41 +72,53 @@ def estimate_migrate(
         else pause_policy.resume_seconds
     )
 
-    arrival_time = at_utc + pd.Timedelta(
-        seconds=(
-            checkpoint_seconds
-            + transfer_duration_seconds
-            + restore_seconds
-        )
+    restore_start = at_utc + pd.Timedelta(
+        seconds=checkpoint_seconds + transfer_duration_seconds
     )
+    arrival_time = restore_start + pd.Timedelta(seconds=restore_seconds)
 
-    source_overhead_seconds = checkpoint_seconds + restore_seconds
-
-    source_intensity = carbon_store.average(
-        source.id,
-        at_utc,
-        source_overhead_seconds,
+    source_checkpoint_forecast = forecast_or_average(
+        carbon_store,
+        node_id=source.id,
+        observed_at_utc=at_utc,
+        forecast_start_utc=at_utc,
+        duration_seconds=checkpoint_seconds,
+        policy=forecast_policy,
     )
-
-    destination_intensity = carbon_store.average(
-        destination.id,
-        arrival_time,
-        compute_seconds,
+    destination_restore_forecast = forecast_or_average(
+        carbon_store,
+        node_id=destination.id,
+        observed_at_utc=at_utc,
+        forecast_start_utc=restore_start,
+        duration_seconds=restore_seconds,
+        policy=forecast_policy,
+    )
+    destination_compute_forecast = forecast_or_average(
+        carbon_store,
+        node_id=destination.id,
+        observed_at_utc=at_utc,
+        forecast_start_utc=arrival_time,
+        duration_seconds=compute_seconds,
+        policy=forecast_policy,
     )
 
     source_effective_power_kw = task.power_kw * source.pue
     destination_effective_power_kw = task.power_kw * destination.pue
 
-    source_overhead_carbon_grams = (
+    source_checkpoint_carbon_grams = (
         source_effective_power_kw
-        * seconds_to_hours(source_overhead_seconds)
-        * source_intensity
+        * seconds_to_hours(checkpoint_seconds)
+        * source_checkpoint_forecast.average_g_per_kwh
     )
-
+    destination_restore_carbon_grams = (
+        destination_effective_power_kw
+        * seconds_to_hours(restore_seconds)
+        * destination_restore_forecast.average_g_per_kwh
+    )
     destination_compute_carbon_grams = (
         destination_effective_power_kw
         * seconds_to_hours(compute_seconds)
-        * destination_intensity
+        * destination_compute_forecast.average_g_per_kwh
     )
 
     transfer_size_gb = bytes_to_gb(total_transfer_bytes)
@@ -120,13 +130,11 @@ def estimate_migrate(
     )
 
     mean_network_intensity = (
-        source_intensity + destination_intensity
+        source_checkpoint_forecast.average_g_per_kwh
+        + destination_restore_forecast.average_g_per_kwh
     ) / 2.0
 
-    network_carbon_grams = (
-        network_energy_kwh
-        * mean_network_intensity
-    )
+    network_carbon_grams = network_energy_kwh * mean_network_intensity
 
     compute_cost_usd = (
         destination.compute_price_usd_per_hour
@@ -151,14 +159,12 @@ def estimate_migrate(
         destination_node_id=destination.id,
         time_seconds=total_time_seconds,
         carbon_grams=(
-            source_overhead_carbon_grams
+            source_checkpoint_carbon_grams
+            + destination_restore_carbon_grams
             + destination_compute_carbon_grams
             + network_carbon_grams
         ),
-        cost_usd=(
-            compute_cost_usd
-            + transfer_cost_usd
-        ),
+        cost_usd=compute_cost_usd + transfer_cost_usd,
         details={
             "distance_km": edge.distance_km,
             "bandwidth_mbps": edge.bandwidth_mbps,
@@ -173,14 +179,43 @@ def estimate_migrate(
             "total_transfer_bytes": total_transfer_bytes,
             "transfer_seconds": transfer_duration_seconds,
             "transfer_size_gb": transfer_size_gb,
-            "source_carbon_intensity_g_per_kwh": source_intensity,
-            "destination_carbon_intensity_g_per_kwh": (
-                destination_intensity
+            "source_checkpoint_carbon_intensity_g_per_kwh": (
+                source_checkpoint_forecast.average_g_per_kwh
+            ),
+            "destination_restore_carbon_intensity_g_per_kwh": (
+                destination_restore_forecast.average_g_per_kwh
+            ),
+            "destination_compute_carbon_intensity_g_per_kwh": (
+                destination_compute_forecast.average_g_per_kwh
+            ),
+            "source_checkpoint_carbon_grams": (
+                source_checkpoint_carbon_grams
+            ),
+            "destination_restore_carbon_grams": (
+                destination_restore_carbon_grams
+            ),
+            "destination_compute_carbon_grams": (
+                destination_compute_carbon_grams
+            ),
+            "carbon_confidence": min(
+                source_checkpoint_forecast.confidence,
+                destination_restore_forecast.confidence,
+                destination_compute_forecast.confidence,
+            ),
+            "source_checkpoint_carbon_forecast": (
+                source_checkpoint_forecast.model_dump(mode="json")
+            ),
+            "destination_restore_carbon_forecast": (
+                destination_restore_forecast.model_dump(mode="json")
+            ),
+            "destination_compute_carbon_forecast": (
+                destination_compute_forecast.model_dump(mode="json")
             ),
             "network_energy_kwh": network_energy_kwh,
             "network_carbon_grams": network_carbon_grams,
             "compute_cost_usd": compute_cost_usd,
             "transfer_cost_usd": transfer_cost_usd,
+            "restore_start_utc": restore_start.isoformat(),
             "arrival_time_utc": arrival_time.isoformat(),
         },
     )

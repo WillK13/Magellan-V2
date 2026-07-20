@@ -44,6 +44,7 @@ class AdaptationSignals(BaseModel):
     deadline_slack_ratio: float | None = Field(default=None, ge=0)
     carbon_opportunity_fraction: float = Field(default=0.0, ge=0, le=1)
     telemetry_confidence: float = Field(default=0.0, ge=0, le=1)
+    carbon_forecast_confidence: float = Field(default=0.0, ge=0, le=1)
     cost_cap_exhausted: bool = False
     deadline_at_risk: bool = False
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -112,7 +112,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -190,6 +190,11 @@ async def health() -> dict:
             context.adaptive_policy_store.path
         ),
         "runtime_adapters": ["command", "dendro", "python_module"],
+        "carbon_forecast_enabled": context.policy.carbon_forecast.enabled,
+        "carbon_forecast_provider": context.policy.carbon_forecast.provider,
+        "pause_candidate_idle_seconds": (
+            context.policy.pause.idle_candidates()
+        ),
         "configured_architecture": (
             context.local_node.capabilities.architecture
         ),
@@ -247,9 +252,56 @@ async def capabilities() -> dict:
         "configured": configured.model_dump(mode="json"),
         "observed": observed.model_dump(mode="json"),
         "runtime_adapters": ["command", "dendro", "python_module"],
+        "carbon_forecast_enabled": context.policy.carbon_forecast.enabled,
+        "carbon_forecast_provider": context.policy.carbon_forecast.provider,
+        "pause_candidate_idle_seconds": (
+            context.policy.pause.idle_candidates()
+        ),
         "drift": drift,
         "ready": not drift,
     }
+
+
+@app.get("/carbon/forecast/{node_id}")
+async def carbon_forecast(
+    node_id: str,
+    horizon_seconds: float | None = None,
+    start_offset_seconds: float = 0.0,
+) -> dict:
+    try:
+        context.cluster.get_node(node_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if start_offset_seconds < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="start_offset_seconds must be non-negative",
+        )
+    duration = (
+        context.policy.carbon_forecast.horizon_seconds
+        if horizon_seconds is None
+        else horizon_seconds
+    )
+    if duration < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="horizon_seconds must be non-negative",
+        )
+    observed_at = context.clock.now()
+    forecast_start = observed_at + timedelta(
+        seconds=start_offset_seconds
+    )
+    try:
+        forecast = context.carbon_store.forecast(
+            node_id=node_id,
+            observed_at_utc=observed_at,
+            forecast_start_utc=forecast_start,
+            duration_seconds=duration,
+            policy=context.policy.carbon_forecast,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return forecast.model_dump(mode="json")
 
 
 @app.get("/nodes/{node_id}")
@@ -508,6 +560,10 @@ async def policy_summary() -> dict:
         "node_id": context.local_node.id,
         "baseline_weights": context.policy.weights.model_dump(),
         "adaptive": context.policy.adaptive.model_dump(),
+        "carbon_forecast": context.policy.carbon_forecast.model_dump(),
+        "pause_candidate_idle_seconds": (
+            context.policy.pause.idle_candidates()
+        ),
         "task_states": [
             state.model_dump(mode="json")
             for state in context.adaptive_policy_store.list_states()

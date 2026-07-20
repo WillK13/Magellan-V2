@@ -11,7 +11,14 @@
     "resume_seconds": 120,
     "max_pause_window_seconds": 7200,
     "min_pause_gap_seconds": 600,
-    "scan_interval_seconds": 0.5
+    "scan_interval_seconds": 0.5,
+    "candidate_idle_seconds": [
+      0,
+      300,
+      900,
+      1800,
+      3600
+    ]
   },
   "migration": {
     "min_migration_gap_seconds": 60,
@@ -68,5 +75,20 @@
     "rolling_window_epochs": 24,
     "decision_history_limit": 50,
     "confidence_floor": 0.25
+  },
+  "carbon_forecast": {
+    "enabled": true,
+    "provider": "linear_trend",
+    "history_points": 8,
+    "minimum_points": 4,
+    "sample_interval_seconds": 900,
+    "horizon_seconds": 3600,
+    "forecast_sample_seconds": 300,
+    "maximum_change_per_hour": 100,
+    "stale_after_seconds": 1800,
+    "configured_fallback_g_per_kwh": null,
+    "confidence_floor": 0.1,
+    "persistence_confidence": 0.5,
+    "fallback_confidence": 0.1
   }
 }

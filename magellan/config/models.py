@@ -59,6 +59,7 @@ class NodeConfig(BaseModel):
     pue: float = Field(default=1.2, ge=1)
     compute_price_usd_per_hour: float = Field(default=0.0, ge=0)
     egress_price_usd_per_gb: float = Field(default=0.0, ge=0)
+    carbon_fallback_g_per_kwh: float | None = Field(default=None, ge=0)
 
 
 class ClusterConfig(BaseModel):

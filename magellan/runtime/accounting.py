@@ -12,6 +12,7 @@ from magellan.telemetry.store import TelemetryStore
 from magellan.graph.topology import ClusterGraph
 from magellan.models.utils import bytes_to_gb, seconds_to_hours
 from magellan.runtime.clock import MagellanClock
+from magellan.runtime.dendro import DendroProgressSynchronizer
 from magellan.runtime.local_process import pid_is_alive
 from magellan.runtime.progress import load_progress
 from magellan.state.persistent_registry import PersistentTaskRegistry
@@ -39,6 +40,7 @@ class RuntimeAccountingService:
         self._clock = clock
         self._registry = registry
         self._telemetry_store = telemetry_store
+        self._dendro_progress = DendroProgressSynchronizer(registry)
 
     def _as_wall_datetime(
         self,
@@ -59,6 +61,7 @@ class RuntimeAccountingService:
         if progress_file is None:
             return {}
 
+        self._dendro_progress.refresh(task_id)
         snapshot = load_progress(progress_file, task_id)
         if snapshot is None:
             return {}

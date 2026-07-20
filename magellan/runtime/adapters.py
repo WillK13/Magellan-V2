@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,17 +88,48 @@ class DendroCommandAdapter:
 
     @staticmethod
     def _checkpoint_ready(
+        spec: LocalProcessSpec,
         checkpoint_directory: Path,
         checkpoint_file: Path,
-    ) -> bool:
+    ) -> tuple[bool, int | None]:
+        manifest_relative = spec.checkpoint_manifest_relative_path
+        if manifest_relative is not None:
+            manifest_path = checkpoint_directory / manifest_relative
+            if not manifest_path.is_file():
+                return False, None
+            try:
+                manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                return False, None
+            files = manifest.get("files")
+            if not isinstance(files, list) or not files:
+                return False, None
+            for item in files:
+                if not isinstance(item, dict):
+                    return False, None
+                relative = item.get("path")
+                expected_size = item.get("size_bytes")
+                if not isinstance(relative, str) or not isinstance(
+                    expected_size, int
+                ):
+                    return False, None
+                path = checkpoint_directory / relative
+                if not path.is_file() or path.stat().st_size != expected_size:
+                    return False, None
+            step = manifest.get("checkpoint_step")
+            return True, step if isinstance(step, int) else None
+
         if checkpoint_file.is_file() and checkpoint_file.stat().st_size > 0:
-            return True
+            return True, None
         if checkpoint_directory.is_dir():
-            return any(
+            ready = any(
                 path.is_file() and path.stat().st_size > 0
                 for path in checkpoint_directory.rglob("*")
             )
-        return False
+            return ready, None
+        return False, None
 
     def build_launch_plan(
         self,
@@ -106,7 +138,8 @@ class DendroCommandAdapter:
         checkpoint_directory: Path,
         checkpoint_file: Path,
     ) -> RuntimeLaunchPlan:
-        resumed = self._checkpoint_ready(
+        resumed, checkpoint_step = self._checkpoint_ready(
+            spec,
             checkpoint_directory,
             checkpoint_file,
         )
@@ -124,6 +157,11 @@ class DendroCommandAdapter:
                 "MAGELLAN_DENDRO_RESUME": "1" if resumed else "0",
                 "MAGELLAN_DENDRO_CHECKPOINT_DIRECTORY": str(
                     checkpoint_directory
+                ),
+                "MAGELLAN_DENDRO_CHECKPOINT_STEP": (
+                    str(checkpoint_step)
+                    if checkpoint_step is not None
+                    else ""
                 ),
             },
         )

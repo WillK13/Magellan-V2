@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 from pathlib import Path
+import re
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -54,6 +55,77 @@ class TaskAccountingSnapshot(BaseModel):
     progress_updated_at_utc: datetime | None = None
 
 
+class DendroCheckpointDiscoverySpec(BaseModel):
+    file_globs: list[str] = Field(default_factory=list)
+    step_regex: str | None = None
+    rank_regex: str | None = None
+    expected_file_count: int | None = Field(default=None, ge=1)
+    expected_rank_count: int | None = Field(default=None, ge=1)
+    stability_seconds: float = Field(default=2.0, ge=0)
+    include_sha256: bool = True
+
+    @model_validator(mode="after")
+    def validate_discovery(self) -> "DendroCheckpointDiscoverySpec":
+        if not self.file_globs:
+            raise ValueError("Dendro checkpoint discovery requires file_globs")
+        for name, pattern in {
+            "step_regex": self.step_regex,
+            "rank_regex": self.rank_regex,
+        }.items():
+            if pattern is None:
+                continue
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"Invalid {name}: {exc}") from exc
+        return self
+
+
+class DendroProgressSpec(BaseModel):
+    log_relative_path: str = "logs/process.log"
+    step_regex: str
+    total_steps: float | None = Field(default=None, gt=0)
+    max_log_bytes: int = Field(default=1_048_576, ge=1024)
+
+    @model_validator(mode="after")
+    def validate_progress(self) -> "DendroProgressSpec":
+        path = Path(self.log_relative_path)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("Dendro progress log must be a safe relative path")
+        try:
+            re.compile(self.step_regex)
+        except re.error as exc:
+            raise ValueError(f"Invalid Dendro progress regex: {exc}") from exc
+        return self
+
+
+class DendroCompletionSpec(BaseModel):
+    accept_zero_exit_code: bool = True
+    log_relative_path: str = "logs/process.log"
+    success_regex: str | None = None
+    max_log_bytes: int = Field(default=1_048_576, ge=1024)
+
+    @model_validator(mode="after")
+    def validate_completion(self) -> "DendroCompletionSpec":
+        path = Path(self.log_relative_path)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("Dendro completion log must be a safe relative path")
+        if self.success_regex is not None:
+            try:
+                re.compile(self.success_regex)
+            except re.error as exc:
+                raise ValueError(
+                    f"Invalid Dendro completion regex: {exc}"
+                ) from exc
+        return self
+
+
+class DendroRuntimeOptions(BaseModel):
+    checkpoint_discovery: DendroCheckpointDiscoverySpec | None = None
+    progress: DendroProgressSpec | None = None
+    completion: DendroCompletionSpec | None = None
+
+
 class LocalProcessSpec(BaseModel):
     """Portable runtime contract for Python modules and local commands.
 
@@ -92,6 +164,7 @@ class LocalProcessSpec(BaseModel):
 
     stop_timeout_seconds: float = Field(default=10.0, gt=0)
     minimum_process_count: int = Field(default=1, ge=1)
+    dendro_options: DendroRuntimeOptions | None = None
 
     @model_validator(mode="after")
     def validate_runtime(self) -> "LocalProcessSpec":
@@ -108,6 +181,17 @@ class LocalProcessSpec(BaseModel):
 
         if self.adapter != "dendro" and self.resume_arguments:
             raise ValueError("resume_arguments are only valid for dendro runtime")
+        if self.adapter != "dendro" and self.dendro_options is not None:
+            raise ValueError("dendro_options are only valid for dendro runtime")
+        if (
+            self.adapter == "dendro"
+            and self.dendro_options is not None
+            and self.dendro_options.checkpoint_discovery is not None
+            and self.checkpoint_manifest_relative_path is None
+        ):
+            raise ValueError(
+                "Dendro checkpoint discovery requires a checkpoint manifest"
+            )
 
         values = {
             "checkpoint_relative_path": self.checkpoint_relative_path,

@@ -28,10 +28,50 @@ class ObjectiveWeights(BaseModel):
 class PausePolicy(BaseModel):
     pause_seconds: float = Field(ge=0)
     idle_seconds: float = Field(ge=0)
+    candidate_idle_seconds: list[float] = Field(default_factory=list)
     resume_seconds: float = Field(ge=0)
     max_pause_window_seconds: float = Field(gt=0)
     min_pause_gap_seconds: float = Field(default=0.0, ge=0)
     scan_interval_seconds: float = Field(default=1.0, gt=0)
+
+    @model_validator(mode="after")
+    def validate_pause_candidates(self) -> "PausePolicy":
+        candidates = self.idle_candidates()
+        if any(value < 0 for value in candidates):
+            raise ValueError("Pause candidate durations must be non-negative")
+        if any(value > self.max_pause_window_seconds for value in candidates):
+            raise ValueError(
+                "Pause candidate duration exceeds max_pause_window_seconds"
+            )
+        return self
+
+    def idle_candidates(self) -> list[float]:
+        raw = self.candidate_idle_seconds or [self.idle_seconds]
+        if self.idle_seconds not in raw:
+            raw = [self.idle_seconds, *raw]
+        return sorted(set(float(value) for value in raw))
+
+
+class CarbonForecastPolicy(BaseModel):
+    enabled: bool = True
+    provider: Literal["linear_trend", "persistence"] = "linear_trend"
+    history_points: int = Field(default=8, ge=1, le=1000)
+    minimum_points: int = Field(default=4, ge=1, le=1000)
+    sample_interval_seconds: float = Field(default=900.0, gt=0)
+    horizon_seconds: float = Field(default=3600.0, gt=0)
+    forecast_sample_seconds: float = Field(default=300.0, gt=0)
+    maximum_change_per_hour: float = Field(default=100.0, ge=0)
+    stale_after_seconds: float = Field(default=1800.0, gt=0)
+    configured_fallback_g_per_kwh: float | None = Field(default=None, ge=0)
+    confidence_floor: float = Field(default=0.1, ge=0, le=1)
+    persistence_confidence: float = Field(default=0.5, ge=0, le=1)
+    fallback_confidence: float = Field(default=0.1, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_forecast_window(self) -> "CarbonForecastPolicy":
+        if self.minimum_points > self.history_points:
+            raise ValueError("minimum_points cannot exceed history_points")
+        return self
 
 
 class MigrationPolicy(BaseModel):
@@ -139,4 +179,7 @@ class ScoringPolicy(BaseModel):
     )
     auction: AuctionPolicy = Field(default_factory=AuctionPolicy)
     adaptive: AdaptivePolicy = Field(default_factory=AdaptivePolicy)
+    carbon_forecast: CarbonForecastPolicy = Field(
+        default_factory=CarbonForecastPolicy
+    )
     clock: ClockPolicy

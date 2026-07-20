@@ -151,3 +151,25 @@ def test_adaptive_policy_store_survives_restart(tmp_path) -> None:
     assert state.decision_count == 1
     assert state.last_decision is not None
     assert restarted.path.exists()
+
+
+def test_carbon_forecast_confidence_dampens_carbon_adaptation(tmp_path) -> None:
+    now = datetime.now(timezone.utc)
+    high = service(tmp_path / "high").prepare(
+        profile(),
+        estimates(local_carbon=100, migration_carbon=10),
+        now,
+        telemetry_confidence=1.0,
+        carbon_forecast_confidence=1.0,
+    )
+    low = service(tmp_path / "low").prepare(
+        profile(),
+        estimates(local_carbon=100, migration_carbon=10),
+        now,
+        telemetry_confidence=1.0,
+        carbon_forecast_confidence=0.1,
+    )
+
+    assert high.signals.carbon_forecast_confidence == 1.0
+    assert low.signals.carbon_forecast_confidence == 0.1
+    assert high.multipliers.carbon > low.multipliers.carbon

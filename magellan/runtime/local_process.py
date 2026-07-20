@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -14,6 +15,7 @@ from magellan.runtime.adapters import RuntimeAdapterRegistry
 from magellan.runtime.completion import (
     CompletionManager,
 )
+from magellan.runtime.dendro import DendroCompletionSynthesizer
 from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
@@ -84,6 +86,7 @@ class LocalProcessRuntime:
         self._processes: dict[str, subprocess.Popen] = {}
         self._artifact_manager = artifact_manager
         self._completion_manager = completion_manager
+        self._dendro_completion = DendroCompletionSynthesizer(registry)
         self._adapter_registry = adapter_registry or RuntimeAdapterRegistry()
         self._node_capabilities = (
             node_capabilities or NodeRuntimeCapabilities()
@@ -101,6 +104,17 @@ class LocalProcessRuntime:
         checkpoint_manifest_file = (
             self._registry.checkpoint_manifest_file(task_id)
         )
+        checkpoint_step = ""
+        if checkpoint_manifest_file is not None and checkpoint_manifest_file.is_file():
+            try:
+                manifest = json.loads(
+                    checkpoint_manifest_file.read_text(encoding="utf-8")
+                )
+                raw_step = manifest.get("checkpoint_step")
+                if raw_step is not None:
+                    checkpoint_step = str(raw_step)
+            except (OSError, json.JSONDecodeError):
+                checkpoint_step = ""
 
         return value.format(
             task_id=task_id,
@@ -142,6 +156,7 @@ class LocalProcessRuntime:
                 if checkpoint_manifest_file is not None
                 else ""
             ),
+            checkpoint_step=checkpoint_step,
         )
 
     def start(self, task_id: str) -> TaskRuntimeState:
@@ -489,6 +504,10 @@ class LocalProcessRuntime:
                 continue
 
             self._processes.pop(state.task_id, None)
+            self._dendro_completion.synthesize(
+                state.task_id,
+                exit_code,
+            )
 
             if self._completion_manager.completion_marker_exists(
                 state.task_id
@@ -556,10 +575,13 @@ class LocalProcessRuntime:
 
     @staticmethod
     def _process_group_count(process_group_id: int) -> int:
+        procfs_count = 1
         try:
-            return ProcfsProcessSampler().sample(
+            procfs_count = ProcfsProcessSampler().sample(
                 process_group_id
             ).process_count
+            if procfs_count > 1:
+                return procfs_count
         except Exception:
             # macOS and other non-procfs platforms can still enumerate the
             # processes in a POSIX process group through ``ps``. This keeps
@@ -582,9 +604,9 @@ class LocalProcessRuntime:
                     continue
                 if pgid == process_group_id:
                     count += 1
-            return max(count, 1)
+            return max(count, procfs_count, 1)
         except (OSError, subprocess.SubprocessError):
-            return 1
+            return max(procfs_count, 1)
 
     def _wait_for_readiness(
         self,

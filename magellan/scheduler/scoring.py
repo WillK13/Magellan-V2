@@ -47,20 +47,24 @@ def build_raw_actions(
             carbon_store=carbon_store,
             at_utc=now,
             horizon_seconds=policy.horizon_seconds,
+            forecast_policy=policy.carbon_forecast,
         )
     )
 
-    pause_estimate = estimate_pause(
-        task=task,
-        node=source,
-        carbon_store=carbon_store,
-        at_utc=now,
-        horizon_seconds=policy.horizon_seconds,
-        pause_policy=policy.pause,
-    )
+    for idle_seconds in policy.pause.idle_candidates():
+        pause_estimate = estimate_pause(
+            task=task,
+            node=source,
+            carbon_store=carbon_store,
+            at_utc=now,
+            horizon_seconds=policy.horizon_seconds,
+            pause_policy=policy.pause,
+            idle_seconds=idle_seconds,
+            forecast_policy=policy.carbon_forecast,
+        )
 
-    if pause_estimate is not None:
-        estimates.append(pause_estimate)
+        if pause_estimate is not None:
+            estimates.append(pause_estimate)
 
     for destination in graph.peers(source.id):
         if (
@@ -93,6 +97,7 @@ def build_raw_actions(
             static_data_bytes_override=(
                 static_data_bytes_override
             ),
+            forecast_policy=policy.carbon_forecast,
         )
 
         if (
@@ -233,10 +238,13 @@ def choose_action(
                     ),
                 )
 
+        idle_seconds = float(best_overall.details.get("idle_seconds", 0.0))
         return DecisionResult(
             selected=best_overall,
             ranked_actions=ranked_actions,
-            reason="Pause has the lowest score",
+            reason=(
+                f"Pause for {idle_seconds:g} seconds has the lowest score"
+            ),
         )
 
     if best_overall.action == ActionType.CONTINUE:
@@ -336,11 +344,25 @@ def evaluate_task(
                 max(0, peer_count - migration_count)
             ),
         }
+        forecast_confidences = [
+            float(item.details["carbon_confidence"])
+            for item in estimates
+            if (
+                isinstance(item.details.get("carbon_confidence"), (int, float))
+                and float(item.details["carbon_confidence"]) > 0
+            )
+        ]
+        carbon_forecast_confidence = (
+            min(forecast_confidences)
+            if forecast_confidences
+            else telemetry_confidence
+        )
         adaptive_context = adaptive_service.prepare(
             task,
             estimates,
             timestamp,
             telemetry_confidence=telemetry_confidence,
+            carbon_forecast_confidence=carbon_forecast_confidence,
             hard_constraints=hard_constraints,
         )
 

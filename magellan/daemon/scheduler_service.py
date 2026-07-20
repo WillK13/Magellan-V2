@@ -234,58 +234,70 @@ class SchedulerService:
             trace_time,
         )
 
+        checkpoint_summary = None
+        checkpoint_error: CheckpointValidationError | None = None
         try:
             checkpoint_summary = await asyncio.to_thread(
                 self._checkpoint_manager.validate,
                 task_id,
             )
         except CheckpointValidationError as exc:
-            print(
-                f"[scheduler-skip] task={task_id} "
-                f"checkpoint_not_ready={exc}",
-                flush=True,
-            )
-            return
+            checkpoint_error = exc
 
         task = self._registry.scoring_profile(
             task_id,
-            checkpoint_bytes=checkpoint_summary.size_bytes,
+            checkpoint_bytes=(
+                checkpoint_summary.size_bytes
+                if checkpoint_summary is not None
+                else None
+            ),
         )
         if self._telemetry_service is not None:
             task = self._telemetry_service.enrich_profile(task)
 
-        print(
-            f"[checkpoint-size] task={task_id} "
-            f"bytes={checkpoint_summary.size_bytes} "
-            f"files={checkpoint_summary.file_count}",
-            flush=True,
-        )
-
-        compatible_destination_ids = self._compatible_destinations(task)
         static_data_bytes_by_destination: dict[str, int] = {}
-
-        for destination in self._graph.peers(
-            self._local_node.id
-        ):
-            if destination.id not in compatible_destination_ids:
-                continue
-            missing_bytes = (
-                await self._prefetch_service.missing_bytes(
-                    task_id=task_id,
-                    destination_node_id=destination.id,
-                )
-            )
-
-            static_data_bytes_by_destination[
-                destination.id
-            ] = missing_bytes
-
+        if checkpoint_summary is None:
+            # A task may not have produced its first application checkpoint
+            # yet. Continue and pause remain valid local decisions, while
+            # migration is a hard-infeasible action until a complete
+            # checkpoint exists. Do not skip the whole scheduler epoch.
+            compatible_destination_ids: set[str] = set()
             print(
-                f"[artifact-plan] task={task_id} "
-                f"destination={destination.id} "
-                f"missing_bytes={missing_bytes}",
+                f"[scheduler-local-only] task={task_id} "
+                f"checkpoint_not_ready={checkpoint_error}",
                 flush=True,
             )
+        else:
+            print(
+                f"[checkpoint-size] task={task_id} "
+                f"bytes={checkpoint_summary.size_bytes} "
+                f"files={checkpoint_summary.file_count}",
+                flush=True,
+            )
+
+            compatible_destination_ids = self._compatible_destinations(task)
+            for destination in self._graph.peers(
+                self._local_node.id
+            ):
+                if destination.id not in compatible_destination_ids:
+                    continue
+                missing_bytes = (
+                    await self._prefetch_service.missing_bytes(
+                        task_id=task_id,
+                        destination_node_id=destination.id,
+                    )
+                )
+
+                static_data_bytes_by_destination[
+                    destination.id
+                ] = missing_bytes
+
+                print(
+                    f"[artifact-plan] task={task_id} "
+                    f"destination={destination.id} "
+                    f"missing_bytes={missing_bytes}",
+                    flush=True,
+                )
 
         telemetry_confidence = 0.0
         if self._telemetry_service is not None:
