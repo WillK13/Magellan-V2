@@ -110,6 +110,16 @@ class AuctionPolicy(BaseModel):
     )
 
 
+class AdaptivePolicy(BaseModel):
+    """Bounded runtime adaptation of time, carbon, and cost weights."""
+
+    enabled: bool = True
+    multiplier_bound_fraction: float = Field(default=0.25, ge=0, le=0.5)
+    rolling_window_epochs: int = Field(default=24, ge=1, le=1000)
+    decision_history_limit: int = Field(default=50, ge=1, le=1000)
+    confidence_floor: float = Field(default=0.25, ge=0, le=1)
+
+
 class ClockPolicy(BaseModel):
     mode: Literal["wall", "trace"]
     trace_start_utc: str | None = None
@@ -128,4 +138,5 @@ class ScoringPolicy(BaseModel):
         default_factory=ReconciliationPolicy
     )
     auction: AuctionPolicy = Field(default_factory=AuctionPolicy)
+    adaptive: AdaptivePolicy = Field(default_factory=AdaptivePolicy)
     clock: ClockPolicy

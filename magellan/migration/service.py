@@ -30,6 +30,7 @@ from magellan.migration.transfer import RsyncCheckpointTransfer
 from magellan.runtime.accounting import RuntimeAccountingService
 from magellan.runtime.checkpoint import CheckpointManager
 from magellan.runtime.local_process import LocalProcessRuntime
+from magellan.policy.store import AdaptivePolicyStore
 from magellan.state.persistent_registry import PersistentTaskRegistry
 from magellan.state.task_models import TaskStatus
 from magellan.telemetry.store import TelemetryStore
@@ -54,6 +55,7 @@ class MigrationService:
         journal: MigrationJournal | None = None,
         reconciliation_policy: ReconciliationPolicy | None = None,
         telemetry_store: TelemetryStore | None = None,
+        adaptive_policy_store: AdaptivePolicyStore | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -73,6 +75,7 @@ class MigrationService:
             reconciliation_policy or ReconciliationPolicy()
         )
         self._telemetry_store = telemetry_store
+        self._adaptive_policy_store = adaptive_policy_store
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, task_id: str) -> asyncio.Lock:
@@ -170,6 +173,11 @@ class MigrationService:
                     for binding in artifact_bindings
                 },
                 accounting=self._registry.accounting_snapshot(task_id),
+                adaptive_policy=(
+                    self._adaptive_policy_store.get(task_id)
+                    if self._adaptive_policy_store is not None
+                    else None
+                ),
             )
         )
         self._set_record_status(
@@ -452,6 +460,11 @@ class MigrationService:
                     accounting=self._registry.accounting_snapshot(
                         task_id
                     ),
+                    adaptive_policy=(
+                        self._adaptive_policy_store.get(task_id)
+                        if self._adaptive_policy_store is not None
+                        else None
+                    ),
                 )
 
                 self._set_record_status(
@@ -642,6 +655,12 @@ class MigrationService:
 
         # Idempotent retry after a successful activation/consumption.
         if (
+            request.adaptive_policy is not None
+            and self._adaptive_policy_store is not None
+        ):
+            self._adaptive_policy_store.merge(request.adaptive_policy)
+
+        if (
             state.last_migration_id == request.migration_id
             and state.owner_node_id == self._local_node.id
             and state.generation == request.generation
@@ -793,6 +812,14 @@ class MigrationService:
             )
             restore_seconds = time.monotonic() - restore_started
             runtime_started = True
+
+            if (
+                request.adaptive_policy is not None
+                and self._adaptive_policy_store is not None
+            ):
+                self._adaptive_policy_store.merge(
+                    request.adaptive_policy
+                )
 
             await self._bid_store.consume(request.bid_id)
             self._set_record_status(

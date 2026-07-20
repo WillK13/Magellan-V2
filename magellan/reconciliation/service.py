@@ -9,6 +9,7 @@ from magellan.reconciliation.client import ReconciliationClient
 from magellan.state.persistent_registry import PersistentTaskRegistry
 from magellan.submission.catalog import TaskCatalogStore
 from magellan.submission.client import TaskCatalogClient
+from magellan.policy.store import AdaptivePolicyStore
 
 
 class DistributedReconciliationService:
@@ -23,6 +24,7 @@ class DistributedReconciliationService:
         migration_service: MigrationService,
         catalog: TaskCatalogStore | None = None,
         catalog_client: TaskCatalogClient | None = None,
+        adaptive_policy_store: AdaptivePolicyStore | None = None,
     ) -> None:
         self._local_node_id = local_node_id
         self._policy = policy
@@ -31,6 +33,7 @@ class DistributedReconciliationService:
         self._migration_service = migration_service
         self._catalog = catalog
         self._catalog_client = catalog_client
+        self._adaptive_policy_store = adaptive_policy_store
         self.last_completed_at_utc: datetime | None = None
         self.last_applied_updates = 0
         self.last_catalog_definitions = 0
@@ -87,6 +90,13 @@ class DistributedReconciliationService:
                             self._registry.set_artifact_digests(
                                 update.task_id,
                                 update.artifact_digests,
+                            )
+                        if (
+                            update.adaptive_policy is not None
+                            and self._adaptive_policy_store is not None
+                        ):
+                            self._adaptive_policy_store.merge(
+                                update.adaptive_policy
                             )
                         applied += 1
                 except KeyError:

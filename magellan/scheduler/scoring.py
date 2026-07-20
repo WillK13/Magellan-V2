@@ -19,6 +19,8 @@ from magellan.models.types import (
     TaskProfile,
 )
 from magellan.models.utils import minmax_normalize
+from magellan.policy.adaptive import AdaptivePolicyService
+from magellan.policy.models import AdaptiveDecisionContext
 
 
 def build_raw_actions(
@@ -100,24 +102,57 @@ def build_raw_actions(
     return estimates
 
 
+def _normalize_with_bounds(
+    values: list[float],
+    minimum: float,
+    maximum: float,
+) -> list[float]:
+    if maximum <= minimum:
+        return [0.0 for _ in values]
+    return [
+        max(0.0, min(1.0, (value - minimum) / (maximum - minimum)))
+        for value in values
+    ]
+
+
 def score_actions(
     estimates: list[RawActionEstimate],
     policy: ScoringPolicy,
+    adaptive_context: AdaptiveDecisionContext | None = None,
 ) -> list[ScoredAction]:
     if not estimates:
         raise ValueError("Cannot score an empty action list")
 
-    normalized_times = minmax_normalize(
-        [estimate.time_seconds for estimate in estimates]
-    )
-    normalized_carbons = minmax_normalize(
-        [estimate.carbon_grams for estimate in estimates]
-    )
-    normalized_costs = minmax_normalize(
-        [estimate.cost_usd for estimate in estimates]
-    )
-
-    alpha, beta, gamma = policy.weights.normalized()
+    if adaptive_context is None:
+        normalized_times = minmax_normalize(
+            [estimate.time_seconds for estimate in estimates]
+        )
+        normalized_carbons = minmax_normalize(
+            [estimate.carbon_grams for estimate in estimates]
+        )
+        normalized_costs = minmax_normalize(
+            [estimate.cost_usd for estimate in estimates]
+        )
+        alpha, beta, gamma = policy.weights.normalized()
+    else:
+        bounds = adaptive_context.normalization_bounds
+        normalized_times = _normalize_with_bounds(
+            [estimate.time_seconds for estimate in estimates],
+            bounds.time_min,
+            bounds.time_max,
+        )
+        normalized_carbons = _normalize_with_bounds(
+            [estimate.carbon_grams for estimate in estimates],
+            bounds.carbon_min,
+            bounds.carbon_max,
+        )
+        normalized_costs = _normalize_with_bounds(
+            [estimate.cost_usd for estimate in estimates],
+            bounds.cost_min,
+            bounds.cost_max,
+        )
+        weights = adaptive_context.effective_weights
+        alpha, beta, gamma = weights.time, weights.carbon, weights.cost
 
     scored: list[ScoredAction] = []
 
@@ -260,9 +295,9 @@ def evaluate_task(
     graph: ClusterGraph,
     carbon_store: CarbonStore,
     at_utc: str | pd.Timestamp,
-    static_data_bytes_by_destination: (
-        dict[str, int] | None
-    ) = None,
+    static_data_bytes_by_destination: dict[str, int] | None = None,
+    adaptive_service: AdaptivePolicyService | None = None,
+    telemetry_confidence: float = 0.0,
 ) -> DecisionResult:
     estimates = build_raw_actions(
         task=task,
@@ -276,11 +311,56 @@ def evaluate_task(
         ),
     )
 
-    ranked = score_actions(estimates, policy)
+    adaptive_context = None
+    if adaptive_service is not None:
+        timestamp = as_utc_timestamp(at_utc).to_pydatetime()
+        peer_count = len(graph.peers(task.current_node_id))
+        migration_count = sum(
+            item.action == ActionType.MIGRATE for item in estimates
+        )
+        hard_constraints: dict[str, bool | float | str | None] = {
+            "cost_cap_enabled": task.cost_cap_usd is not None,
+            "cost_cap_exhausted": (
+                task.cost_cap_usd is not None
+                and task.accumulated_cost_usd >= task.cost_cap_usd
+            ),
+            "cost_cap_pruned_migrations": float(
+                max(0, peer_count - migration_count)
+            ),
+        }
+        adaptive_context = adaptive_service.prepare(
+            task,
+            estimates,
+            timestamp,
+            telemetry_confidence=telemetry_confidence,
+            hard_constraints=hard_constraints,
+        )
 
-    return choose_action(
+    ranked = score_actions(estimates, policy, adaptive_context)
+    decision = choose_action(
         task=task,
         ranked_actions=ranked,
         policy=policy,
         at_utc=at_utc,
     )
+
+    if adaptive_context is not None:
+        timestamp = as_utc_timestamp(at_utc).to_pydatetime()
+        state = adaptive_service.record_decision(
+            decision,
+            adaptive_context,
+            timestamp,
+        )
+        decision.policy_metadata = {
+            "baseline_weights": adaptive_context.baseline_weights.model_dump(),
+            "effective_weights": adaptive_context.effective_weights.model_dump(),
+            "multipliers": adaptive_context.multipliers.model_dump(),
+            "signals": adaptive_context.signals.model_dump(mode="json"),
+            "normalization_bounds": (
+                adaptive_context.normalization_bounds.model_dump()
+            ),
+            "hard_constraints": adaptive_context.hard_constraints,
+            "decision_count": state.decision_count,
+        }
+
+    return decision

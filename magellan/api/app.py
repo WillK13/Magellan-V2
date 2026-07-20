@@ -14,6 +14,7 @@ from magellan.bidding.models import (
     BidStatus,
 )
 from magellan.daemon.context import build_daemon_context
+from magellan.policy.models import AdaptiveTaskPolicyState
 from magellan.telemetry.models import (
     EdgeTelemetryView,
     MigrationCalibrationView,
@@ -111,7 +112,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.8.0",
+    version="0.9.0",
     lifespan=lifespan,
 )
 
@@ -181,6 +182,13 @@ async def health() -> dict:
             context.telemetry_store.list_calibrations()
         ),
         "telemetry_state_file": str(context.telemetry_store.path),
+        "adaptive_policy_enabled": context.policy.adaptive.enabled,
+        "adaptive_policy_task_count": len(
+            context.adaptive_policy_store.list_states()
+        ),
+        "adaptive_policy_state_file": str(
+            context.adaptive_policy_store.path
+        ),
         "timestamp_utc": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -437,6 +445,50 @@ async def telemetry_calibration() -> list[MigrationCalibrationView]:
     ]
 
 
+@app.get("/policy")
+async def policy_summary() -> dict:
+    return {
+        "node_id": context.local_node.id,
+        "baseline_weights": context.policy.weights.model_dump(),
+        "adaptive": context.policy.adaptive.model_dump(),
+        "task_states": [
+            state.model_dump(mode="json")
+            for state in context.adaptive_policy_store.list_states()
+        ],
+        "state_file": str(context.adaptive_policy_store.path),
+    }
+
+
+@app.get(
+    "/policy/tasks",
+    response_model=list[AdaptiveTaskPolicyState],
+)
+async def policy_task_states() -> list[AdaptiveTaskPolicyState]:
+    return context.adaptive_policy_store.list_states()
+
+
+@app.get(
+    "/policy/tasks/{task_id}",
+    response_model=AdaptiveTaskPolicyState,
+)
+async def policy_task_state(task_id: str) -> AdaptiveTaskPolicyState:
+    state = context.adaptive_policy_store.get(task_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No adaptive policy state for task: {task_id}",
+        )
+    return state
+
+
+@app.post("/policy/tasks/{task_id}/reset")
+async def reset_policy_task_state(task_id: str) -> dict:
+    return {
+        "task_id": task_id,
+        "deleted": context.adaptive_policy_service.reset(task_id),
+    }
+
+
 @app.get("/auction/status")
 async def auction_status() -> dict:
     return await context.bid_arbiter.status()
@@ -690,9 +742,14 @@ async def get_migration(migration_id: str) -> MigrationRecord:
     response_model=OwnershipSnapshot,
 )
 async def ownership_snapshot() -> OwnershipSnapshot:
+    updates = context.registry.ownership_updates()
+    for update in updates:
+        update.adaptive_policy = context.adaptive_policy_store.get(
+            update.task_id
+        )
     return OwnershipSnapshot(
         reporting_node_id=context.local_node.id,
-        updates=context.registry.ownership_updates(),
+        updates=updates,
     )
 
 
@@ -720,6 +777,10 @@ async def ownership_update(
             context.registry.set_artifact_digests(
                 update.task_id,
                 update.artifact_digests,
+            )
+        if applied and update.adaptive_policy is not None:
+            context.adaptive_policy_store.merge(
+                update.adaptive_policy
             )
     except KeyError as exc:
         raise HTTPException(

@@ -22,6 +22,7 @@ from magellan.migration.client import OwnershipBroadcaster
 from magellan.migration.models import OwnershipUpdate
 from magellan.migration.service import MigrationService
 from magellan.models.types import ActionType
+from magellan.policy.adaptive import AdaptivePolicyService
 from magellan.runtime.accounting import RuntimeAccountingService
 from magellan.runtime.clock import MagellanClock
 from magellan.runtime.local_process import (
@@ -64,6 +65,7 @@ class SchedulerService:
         pause_service: PauseService,
         accounting_service: RuntimeAccountingService,
         telemetry_service: TelemetryService | None = None,
+        adaptive_policy_service: AdaptivePolicyService | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -81,6 +83,7 @@ class SchedulerService:
         self._pause_service = pause_service
         self._accounting_service = accounting_service
         self._telemetry_service = telemetry_service
+        self._adaptive_policy_service = adaptive_policy_service
         self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
         self._task_operation_locks: dict[str, asyncio.Lock] = {}
 
@@ -261,6 +264,15 @@ class SchedulerService:
                 flush=True,
             )
 
+        telemetry_confidence = 0.0
+        if self._telemetry_service is not None:
+            telemetry_view = self._telemetry_service.store.task_view(
+                task.task_id,
+                task.power_kw,
+                self._policy.telemetry.task_stale_after_seconds,
+            )
+            telemetry_confidence = telemetry_view.power_confidence or 0.0
+
         decision = evaluate_task(
             task=task,
             cluster=self._cluster,
@@ -271,6 +283,8 @@ class SchedulerService:
             static_data_bytes_by_destination=(
                 static_data_bytes_by_destination
             ),
+            adaptive_service=self._adaptive_policy_service,
+            telemetry_confidence=telemetry_confidence,
         )
 
         print(
@@ -279,6 +293,20 @@ class SchedulerService:
             f"trace_time={trace_time.isoformat()}",
             flush=True,
         )
+
+        if decision.policy_metadata:
+            effective = decision.policy_metadata["effective_weights"]
+            multipliers = decision.policy_metadata["multipliers"]
+            print(
+                f"[adaptive-policy] task={task_id} "
+                f"weights=({effective['time']:.4f},"
+                f"{effective['carbon']:.4f},"
+                f"{effective['cost']:.4f}) "
+                f"multipliers=({multipliers['time']:.3f},"
+                f"{multipliers['carbon']:.3f},"
+                f"{multipliers['cost']:.3f})",
+                flush=True,
+            )
 
         for rank, action in enumerate(
             decision.ranked_actions,
@@ -631,6 +659,13 @@ class SchedulerService:
                     ),
                     final_output_bytes=state.final_output_bytes,
                     accounting=state.accounting_snapshot(),
+                    adaptive_policy=(
+                        self._adaptive_policy_service.store.get(
+                            state.task_id
+                        )
+                        if self._adaptive_policy_service is not None
+                        else None
+                    ),
                 )
             )
             self._broadcasted_completions.add(key)

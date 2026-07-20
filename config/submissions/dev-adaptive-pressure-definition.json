@@ -1,0 +1,35 @@
+{
+  "definition_id": "adaptive-pressure-counter",
+  "profile": {
+    "workload_type": "counter",
+    "power_kw": 0.1,
+    "checkpoint_bytes": 1024,
+    "data_bytes": 0,
+    "prestaged_node_ids": ["boston", "virginia"],
+    "estimated_remaining_seconds": 3600,
+    "accumulated_cost_usd": 0.009,
+    "cost_cap_usd": 0.01,
+    "priority": 10,
+    "deadline_at_utc": "2024-01-01T00:30:00Z",
+    "resource_request": {
+      "cpu_cores": 1,
+      "memory_mb": 256,
+      "gpu_count": 0,
+      "accelerator_type": null
+    }
+  },
+  "runtime": {
+    "module": "magellan.workloads.counter",
+    "arguments": [
+      "--checkpoint-file", "{checkpoint_file}",
+      "--interval-seconds", "0.2",
+      "--progress-file", "{progress_file}"
+    ],
+    "environment": {},
+    "working_directory": ".",
+    "checkpoint_relative_path": "checkpoint/counter.json",
+    "progress_relative_path": "runtime/progress.json",
+    "stop_timeout_seconds": 10
+  },
+  "artifacts": []
+}

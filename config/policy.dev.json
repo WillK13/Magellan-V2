@@ -61,5 +61,12 @@
     "power_idle_fraction": 0.2,
     "cpu_power_confidence": 0.75,
     "fallback_power_confidence": 0.25
+  },
+  "adaptive": {
+    "enabled": true,
+    "multiplier_bound_fraction": 0.25,
+    "rolling_window_epochs": 24,
+    "decision_history_limit": 50,
+    "confidence_floor": 0.25
   }
 }

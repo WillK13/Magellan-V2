@@ -72,3 +72,4 @@ class DecisionResult(BaseModel):
     selected: ScoredAction
     ranked_actions: list[ScoredAction]
     reason: str
+    policy_metadata: dict[str, Any] = Field(default_factory=dict)

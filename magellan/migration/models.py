@@ -6,6 +6,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from magellan.artifacts.models import ArtifactBinding
+from magellan.policy.models import AdaptiveTaskPolicyState
 from magellan.state.task_models import (
     TaskAccountingSnapshot,
     TaskRuntimeState,
@@ -64,6 +65,7 @@ class MigrationActivationRequest(BaseModel):
         default_factory=list
     )
     accounting: TaskAccountingSnapshot | None = None
+    adaptive_policy: AdaptiveTaskPolicyState | None = None
 
 
 class MigrationActivationResponse(BaseModel):
@@ -95,3 +97,4 @@ class OwnershipUpdate(BaseModel):
     final_output_manifest_sha256: str | None = None
     final_output_bytes: int | None = Field(default=None, ge=0)
     accounting: TaskAccountingSnapshot | None = None
+    adaptive_policy: AdaptiveTaskPolicyState | None = None

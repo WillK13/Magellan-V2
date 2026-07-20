@@ -59,6 +59,8 @@ from magellan.submission.client import TaskCatalogClient
 from magellan.submission.service import TaskSubmissionService
 from magellan.telemetry.service import TelemetryService
 from magellan.telemetry.store import TelemetryStore
+from magellan.policy.adaptive import AdaptivePolicyService
+from magellan.policy.store import AdaptivePolicyStore
 
 
 @dataclass
@@ -94,6 +96,8 @@ class DaemonContext:
     submission_service: TaskSubmissionService
     telemetry_store: TelemetryStore
     telemetry_service: TelemetryService
+    adaptive_policy_store: AdaptivePolicyStore
+    adaptive_policy_service: AdaptivePolicyService
 
 
 def _task_files() -> list[Path]:
@@ -209,6 +213,13 @@ def build_daemon_context() -> DaemonContext:
         ema_alpha=policy.telemetry.ema_alpha,
     )
 
+    adaptive_policy_store = AdaptivePolicyStore(state_root)
+    adaptive_policy_service = AdaptivePolicyService(
+        policy=policy.adaptive,
+        baseline_weights=policy.weights,
+        store=adaptive_policy_store,
+    )
+
     graph = ClusterGraph(
         cluster,
         telemetry_store=telemetry_store,
@@ -314,6 +325,7 @@ def build_daemon_context() -> DaemonContext:
         journal=migration_journal,
         reconciliation_policy=policy.reconciliation,
         telemetry_store=telemetry_store,
+        adaptive_policy_store=adaptive_policy_store,
         client=MigrationClient(
             cluster=cluster,
             activation_timeout_seconds=(
@@ -348,6 +360,7 @@ def build_daemon_context() -> DaemonContext:
         pause_service=pause_service,
         accounting_service=accounting_service,
         telemetry_service=telemetry_service,
+        adaptive_policy_service=adaptive_policy_service,
     )
 
     submission_service = TaskSubmissionService(
@@ -368,6 +381,7 @@ def build_daemon_context() -> DaemonContext:
         ),
         migration_service=migration_service,
         catalog=task_catalog,
+        adaptive_policy_store=adaptive_policy_store,
         catalog_client=TaskCatalogClient(
             cluster=cluster,
             local_node_id=local_node.id,
@@ -402,4 +416,6 @@ def build_daemon_context() -> DaemonContext:
         submission_service=submission_service,
         telemetry_store=telemetry_store,
         telemetry_service=telemetry_service,
+        adaptive_policy_store=adaptive_policy_store,
+        adaptive_policy_service=adaptive_policy_service,
     )
