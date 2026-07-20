@@ -1,0 +1,19 @@
+{
+  "task_id": "llm-001",
+  "workload_type": "llm",
+  "current_node_id": "boston",
+
+  "power_kw": 0.6,
+  "checkpoint_bytes": 1200000000,
+  "data_bytes": 0,
+
+  "prestaged_node_ids": [
+    "boston",
+    "virginia"
+  ],
+
+  "estimated_remaining_seconds": 86400,
+  "accumulated_cost_usd": 0,
+  "cost_cap_usd": null,
+  "last_migration_at": null
+}

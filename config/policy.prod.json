@@ -1,0 +1,94 @@
+{
+  "horizon_seconds": 5400,
+  "weights": {
+    "time": 0.25,
+    "carbon": 0.5,
+    "cost": 0.25
+  },
+  "pause": {
+    "pause_seconds": 120,
+    "idle_seconds": 1800,
+    "resume_seconds": 120,
+    "max_pause_window_seconds": 14400,
+    "min_pause_gap_seconds": 3600,
+    "scan_interval_seconds": 2,
+    "candidate_idle_seconds": [
+      0,
+      900,
+      1800,
+      3600,
+      7200
+    ]
+  },
+  "migration": {
+    "min_migration_gap_seconds": 7200,
+    "required_improvement_fraction": 0.04,
+    "network_energy_kwh_per_gb_base": 0.001,
+    "network_energy_kwh_per_gb_km": 1e-07,
+    "activation_timeout_seconds": 600
+  },
+  "clock": {
+    "mode": "trace",
+    "trace_start_utc": "2024-01-01T00:00:00Z",
+    "trace_seconds_per_real_second": 1
+  },
+  "recovery": {
+    "enabled": true,
+    "max_restart_attempts": 3,
+    "initial_backoff_seconds": 10,
+    "max_backoff_seconds": 120,
+    "scan_interval_seconds": 5
+  },
+  "accounting": {
+    "scan_interval_seconds": 5,
+    "progress_ema_alpha": 0.5
+  },
+  "reconciliation": {
+    "enabled": true,
+    "scan_interval_seconds": 10,
+    "activation_resolution_timeout_seconds": 120,
+    "activation_resolution_poll_seconds": 2
+  },
+  "auction": {
+    "strategy": "lowest_score",
+    "credit_increment": 1.0,
+    "credit_max": 100.0,
+    "accepted_credit_decay": 0.0,
+    "deadline_urgency_window_seconds": 3600.0,
+    "resource_efficiency_floor": 0.01
+  },
+  "telemetry": {
+    "enabled": true,
+    "task_scan_interval_seconds": 5,
+    "edge_probe_interval_seconds": 30,
+    "task_stale_after_seconds": 30,
+    "edge_stale_after_seconds": 180,
+    "calibration_stale_after_seconds": 21600,
+    "ema_alpha": 0.25,
+    "power_idle_fraction": 0.2,
+    "cpu_power_confidence": 0.75,
+    "fallback_power_confidence": 0.25
+  },
+  "adaptive": {
+    "enabled": true,
+    "multiplier_bound_fraction": 0.25,
+    "rolling_window_epochs": 96,
+    "decision_history_limit": 200,
+    "confidence_floor": 0.25
+  },
+  "carbon_forecast": {
+    "enabled": true,
+    "provider": "linear_trend",
+    "history_points": 12,
+    "minimum_points": 4,
+    "sample_interval_seconds": 900,
+    "horizon_seconds": 7200,
+    "forecast_sample_seconds": 300,
+    "maximum_change_per_hour": 100,
+    "stale_after_seconds": 3600,
+    "configured_fallback_g_per_kwh": null,
+    "confidence_floor": 0.1,
+    "persistence_confidence": 0.5,
+    "fallback_confidence": 0.1
+  }
+}

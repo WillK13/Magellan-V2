@@ -1,0 +1,25 @@
+{
+  "candidates": [
+    {
+      "label": "carbon-first",
+      "weights": {"time": 0.15, "carbon": 0.7, "cost": 0.15},
+      "total_time_seconds": 92000,
+      "total_carbon_grams": 2100,
+      "total_cost_usd": 8.5
+    },
+    {
+      "label": "balanced",
+      "weights": {"time": 0.25, "carbon": 0.5, "cost": 0.25},
+      "total_time_seconds": 78000,
+      "total_carbon_grams": 2600,
+      "total_cost_usd": 6.2
+    },
+    {
+      "label": "time-first",
+      "weights": {"time": 0.6, "carbon": 0.25, "cost": 0.15},
+      "total_time_seconds": 65000,
+      "total_carbon_grams": 4100,
+      "total_cost_usd": 7.0
+    }
+  ]
+}

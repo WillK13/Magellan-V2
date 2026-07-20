@@ -1,0 +1,97 @@
+{
+  "definition_id": "dendro-bssn-real",
+  "profile": {
+    "workload_type": "dendro-gr",
+    "power_kw": 0.12,
+    "checkpoint_bytes": 0,
+    "data_bytes": 0,
+    "prestaged_node_ids": [],
+    "estimated_remaining_seconds": 21600,
+    "accumulated_cost_usd": 0,
+    "cost_cap_usd": 10,
+    "priority": 20,
+    "deadline_at_utc": null,
+    "resource_request": {
+      "cpu_cores": 2,
+      "memory_mb": 3072,
+      "gpu_count": 0,
+      "accelerator_type": null
+    },
+    "compatibility": {
+      "architectures": [
+        "x86_64"
+      ],
+      "operating_systems": [
+        "linux"
+      ],
+      "minimum_cpu_cores": 2,
+      "minimum_memory_mb": 3072,
+      "required_commands": [
+        "mpirun"
+      ],
+      "required_runtimes": {
+        "openmpi": ">=4,<5"
+      },
+      "required_features": [
+        "local-command",
+        "process-group",
+        "application-checkpoint",
+        "dendro-adapter",
+        "mpi"
+      ],
+      "checkpoint_architecture_independent": false,
+      "requires_same_mpi_world_size": true
+    }
+  },
+  "runtime": {
+    "adapter": "dendro",
+    "command": [
+      "mpirun",
+      "-np",
+      "2",
+      "<SET_ABSOLUTE_PATH_TO_BSSN_SOLVER>"
+    ],
+    "arguments": [
+      "<SET_ABSOLUTE_PATH_TO_PARAMETER_FILE>"
+    ],
+    "resume_arguments": [
+      "<SET_REAL_DENDRO_RESUME_ARGUMENTS>"
+    ],
+    "environment": {},
+    "working_directory": ".",
+    "checkpoint_relative_path": "checkpoint/dendro.marker",
+    "checkpoint_manifest_relative_path": "manifest.json",
+    "readiness_relative_path": null,
+    "readiness_timeout_seconds": 120,
+    "progress_relative_path": "runtime/progress.json",
+    "completion_relative_path": "runtime/completion.json",
+    "output_relative_directory": "output",
+    "stop_timeout_seconds": 30,
+    "minimum_process_count": 3,
+    "dendro_options": {
+      "checkpoint_discovery": {
+        "file_globs": [
+          "**/*checkpoint*step_*rank_*"
+        ],
+        "step_regex": "step[_-](?P<step>\\d+)",
+        "rank_regex": "rank[_-](?P<rank>\\d+)",
+        "expected_file_count": null,
+        "expected_rank_count": 2,
+        "stability_seconds": 5,
+        "include_sha256": true
+      },
+      "progress": {
+        "log_relative_path": "logs/process.log",
+        "step_regex": "(?:BSSN|timestep|step)[^0-9]*(?P<step>\\d+)",
+        "total_steps": null
+      },
+      "completion": {
+        "accept_zero_exit_code": true,
+        "log_relative_path": "logs/process.log",
+        "success_regex": null,
+        "max_log_bytes": 1048576
+      }
+    }
+  },
+  "artifacts": []
+}

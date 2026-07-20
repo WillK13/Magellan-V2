@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from magellan.config.models import ClusterConfig, NodeConfig
+from magellan.config.policy_models import TelemetryPolicy
+from magellan.models.types import TaskProfile, TaskResourceRequest
+from magellan.state.persistent_registry import PersistentTaskRegistry
+from magellan.state.task_models import LocalProcessSpec, TaskDefinition
+from magellan.telemetry.models import ProcessMeasurement
+from magellan.telemetry.service import TelemetryService
+from magellan.telemetry.store import TelemetryStore
+
+
+class SequenceSampler:
+    def __init__(self, samples: list[ProcessMeasurement]) -> None:
+        self.samples = samples
+
+    def sample(self, _process_group_id: int) -> ProcessMeasurement:
+        return self.samples.pop(0)
+
+
+def node() -> NodeConfig:
+    return NodeConfig(
+        id="boston",
+        name="Boston",
+        vm_name="boston",
+        zone="us-east1-c",
+        internal_ip="10.0.0.1",
+        carbon_region="Boston",
+        dataset_file="unused.csv",
+        latitude=42,
+        longitude=-71,
+        resources={"cpu_cores": 2, "memory_mb": 4096},
+    )
+
+
+def registry(tmp_path) -> PersistentTaskRegistry:
+    definition = TaskDefinition(
+        profile=TaskProfile(
+            task_id="task-1",
+            workload_type="counter",
+            current_node_id="boston",
+            power_kw=0.1,
+            checkpoint_bytes=0,
+            resource_request=TaskResourceRequest(cpu_cores=1, memory_mb=128),
+        ),
+        runtime=LocalProcessSpec(module="example.module"),
+    )
+    result = PersistentTaskRegistry([definition], tmp_path, "boston")
+    result.mark_running("task-1", 999)
+    checkpoint = result.checkpoint_directory("task-1")
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "state.bin").write_bytes(b"x" * 50)
+    return result
+
+
+def test_task_sampler_derives_cpu_power_memory_and_checkpoint(tmp_path) -> None:
+    t0 = datetime.now(timezone.utc)
+    sampler = SequenceSampler(
+        [
+            ProcessMeasurement(
+                pid=999,
+                process_count=1,
+                process_state="R",
+                cpu_time_seconds=10,
+                memory_rss_mb=12,
+                sampled_at_utc=t0,
+            ),
+            ProcessMeasurement(
+                pid=999,
+                process_count=2,
+                process_state="S",
+                cpu_time_seconds=10.5,
+                memory_rss_mb=20,
+                sampled_at_utc=t0 + timedelta(seconds=1),
+            ),
+        ]
+    )
+    store = TelemetryStore(tmp_path, ema_alpha=0.5)
+    service = TelemetryService(
+        local_node=node(),
+        cluster=ClusterConfig(nodes=[node()]),
+        policy=TelemetryPolicy(power_idle_fraction=0.2),
+        registry=registry(tmp_path),
+        store=store,
+        process_sampler=sampler,
+    )
+
+    first = service.sample_task("task-1")
+    assert first.cpu_utilization_percent is None
+    assert first.measured_power_kw == pytest.approx(0.1)
+    assert first.power_source == "configured_fallback"
+
+    second = service.sample_task("task-1")
+    assert second.cpu_utilization_percent == pytest.approx(50)
+    assert second.measured_power_kw == pytest.approx(0.06)
+    assert second.memory_rss_mb == pytest.approx(20)
+    assert second.process_count == 2
+    assert second.checkpoint_bytes == 50
+
+
+def test_enrich_profile_uses_fresh_power_and_checkpoint(tmp_path) -> None:
+    t0 = datetime.now(timezone.utc)
+    store = TelemetryStore(tmp_path)
+    reg = registry(tmp_path)
+    service = TelemetryService(
+        local_node=node(),
+        cluster=ClusterConfig(nodes=[node()]),
+        policy=TelemetryPolicy(task_stale_after_seconds=30),
+        registry=reg,
+        store=store,
+        process_sampler=SequenceSampler([]),
+    )
+    from magellan.telemetry.models import TaskTelemetryRecord
+
+    store.update_task(
+        TaskTelemetryRecord(
+            task_id="task-1",
+            node_id="boston",
+            measured_power_kw=0.07,
+            power_source="procfs_cpu_utilization_model",
+            power_confidence=0.75,
+            checkpoint_bytes=987,
+            sample_count=2,
+            last_sample_at_utc=t0,
+        )
+    )
+    enriched = service.enrich_profile(reg.scoring_profile("task-1"))
+    assert enriched.power_kw == pytest.approx(0.07)
+    assert enriched.checkpoint_bytes == 987

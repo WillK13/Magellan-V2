@@ -1,0 +1,49 @@
+{
+  "definition_id": "dynamic-counter",
+  "profile": {
+    "workload_type": "counter",
+    "power_kw": 0.1,
+    "checkpoint_bytes": 1024,
+    "data_bytes": 0,
+    "prestaged_node_ids": [
+      "boston",
+      "virginia"
+    ],
+    "estimated_remaining_seconds": 120,
+    "accumulated_cost_usd": 0,
+    "cost_cap_usd": 0.05,
+    "priority": 10,
+    "deadline_at_utc": null,
+    "resource_request": {
+      "cpu_cores": 1,
+      "memory_mb": 256,
+      "gpu_count": 0,
+      "accelerator_type": null
+    }
+  },
+  "runtime": {
+    "module": "magellan.workloads.counter",
+    "arguments": [
+      "--checkpoint-file",
+      "{checkpoint_file}",
+      "--interval-seconds",
+      "0.25",
+      "--max-value",
+      "120",
+      "--progress-file",
+      "{progress_file}",
+      "--completion-file",
+      "{completion_file}",
+      "--output-dir",
+      "{output_directory}"
+    ],
+    "environment": {},
+    "working_directory": ".",
+    "checkpoint_relative_path": "checkpoint/counter.json",
+    "progress_relative_path": "runtime/progress.json",
+    "completion_relative_path": "runtime/completion.json",
+    "output_relative_directory": "output",
+    "stop_timeout_seconds": 10
+  },
+  "artifacts": []
+}

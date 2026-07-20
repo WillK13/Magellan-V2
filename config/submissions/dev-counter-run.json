@@ -1,0 +1,10 @@
+{
+  "definition_id": "dynamic-counter",
+  "revision": null,
+  "initial_owner_node_id": "boston",
+  "idempotency_key": "dynamic-counter-gcp-validation-001",
+  "auto_start": true,
+  "labels": {
+    "purpose": "gcp-validation"
+  }
+}
