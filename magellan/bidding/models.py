@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from magellan.capabilities.models import TaskCompatibilityRequirements
+
 from magellan.models.types import ActionType, ScoredAction, TaskResourceRequest
 
 
@@ -53,6 +55,9 @@ class TaskBidContext(BaseModel):
     power_source: str | None = None
     power_confidence: float | None = Field(default=None, ge=0, le=1)
     telemetry_freshness: str | None = None
+    compatibility: TaskCompatibilityRequirements = Field(
+        default_factory=TaskCompatibilityRequirements
+    )
 
 
 class BidRequest(BaseModel):
@@ -106,6 +111,8 @@ class BidRecord(BidRequest):
     auction_credit_before: float = Field(default=0.0, ge=0)
     auction_credit_after: float = Field(default=0.0, ge=0)
     resource_fit: bool | None = None
+    compatibility_fit: bool | None = None
+    compatibility_reasons: list[str] = Field(default_factory=list)
     auction_metrics: dict[
         str,
         float | int | str | bool | None,

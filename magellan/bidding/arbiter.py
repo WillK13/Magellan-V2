@@ -4,6 +4,11 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
+from magellan.capabilities.checker import check_compatibility
+from magellan.capabilities.models import (
+    NodeRuntimeCapabilities,
+    TaskCompatibilityRequirements,
+)
 from magellan.bidding.models import (
     AuctionStrategy,
     BidRecord,
@@ -49,6 +54,7 @@ class BidArbiter:
         bid_window_seconds: float,
         node_resources: NodeResourceCapacity | None = None,
         auction_policy: AuctionPolicy | None = None,
+        node_capabilities: NodeRuntimeCapabilities | None = None,
     ) -> None:
         self._store = store
         self._registry = registry
@@ -59,6 +65,9 @@ class BidArbiter:
             node_resources or NodeResourceCapacity()
         )
         self._auction_policy = auction_policy or AuctionPolicy()
+        self._node_capabilities = (
+            node_capabilities or NodeRuntimeCapabilities()
+        )
         self._strategy = AuctionStrategy(
             self._auction_policy.strategy
         )
@@ -114,6 +123,9 @@ class BidArbiter:
             "task_slot_capacity": self._capacity,
             "available_task_slots": available_slots,
             "resource_capacity": self._node_resources.model_dump(
+                mode="json"
+            ),
+            "runtime_capabilities": self._node_capabilities.model_dump(
                 mode="json"
             ),
             **ledger.snapshot(),
@@ -176,6 +188,15 @@ class BidArbiter:
             individually_feasible, infeasible_reason = (
                 full_ledger.compatible(request)
             )
+            requirements = (
+                bid.task_context.compatibility
+                if bid.task_context is not None
+                else None
+            )
+            compatibility = check_compatibility(
+                requirements or TaskCompatibilityRequirements(),
+                self._node_capabilities,
+            )
             status = BidStatus.REJECTED
             resource_fit = individually_feasible
             earns_credit = False
@@ -185,6 +206,8 @@ class BidArbiter:
                     "Duplicate bid for a task already selected in "
                     "this auction window"
                 )
+            elif not compatibility.compatible:
+                reason = "; ".join(compatibility.reasons)
             elif not individually_feasible:
                 reason = infeasible_reason or (
                     "Task resource request is incompatible with "
@@ -230,6 +253,8 @@ class BidArbiter:
                     0.0,
                 ),
                 resource_fit=resource_fit,
+                compatibility_fit=compatibility.compatible,
+                compatibility_reasons=compatibility.reasons,
                 auction_metrics={
                     **item.metrics,
                     "requested_cpu_cores": request.cpu_cores,

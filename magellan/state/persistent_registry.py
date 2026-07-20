@@ -448,6 +448,9 @@ class PersistentTaskRegistry:
         self,
         task_id: str,
         pid: int,
+        runtime_adapter: str | None = None,
+        launch_command: list[str] | None = None,
+        resumed_from_checkpoint: bool = False,
     ) -> TaskRuntimeState:
         state = self.get_state(task_id)
 
@@ -465,6 +468,12 @@ class PersistentTaskRegistry:
         now = utc_now()
         state.status = TaskStatus.RUNNING
         state.pid = pid
+        state.process_group_id = pid
+        if runtime_adapter is not None:
+            state.runtime_adapter = runtime_adapter
+        if launch_command is not None:
+            state.launch_command = list(launch_command)
+        state.resumed_from_checkpoint = resumed_from_checkpoint
         state.started_at_utc = state.started_at_utc or now
         state.last_accounted_at_utc = now
         state.paused_at_utc = None
@@ -538,6 +547,7 @@ class PersistentTaskRegistry:
 
         state.status = TaskStatus.STOPPED
         state.pid = None
+        state.process_group_id = None
         state.paused_at_utc = None
         state.resume_at_utc = None
         state.resume_wall_at_utc = None
@@ -576,6 +586,7 @@ class PersistentTaskRegistry:
         state = self.get_state(task_id)
         state.status = TaskStatus.FAILED
         state.pid = None
+        state.process_group_id = None
         state.last_error = error
         state.last_exit_code = exit_code
         state.last_failure_at_utc = utc_now()
@@ -627,6 +638,7 @@ class PersistentTaskRegistry:
         state = self.get_state(task_id)
         state.status = TaskStatus.FAILED
         state.pid = None
+        state.process_group_id = None
         state.last_error = error
         state.next_recovery_at_utc = None
         state.recovery_exhausted = True
@@ -651,6 +663,7 @@ class PersistentTaskRegistry:
 
         state.status = TaskStatus.COMPLETED
         state.pid = None
+        state.process_group_id = None
         state.last_error = None
         state.last_exit_code = exit_code
         state.completed_at_utc = completed_at_utc
@@ -688,6 +701,7 @@ class PersistentTaskRegistry:
         state.generation = generation
         state.status = TaskStatus.STOPPED
         state.pid = None
+        state.process_group_id = None
         state.paused_at_utc = None
         state.resume_at_utc = None
         state.resume_wall_at_utc = None
@@ -722,6 +736,7 @@ class PersistentTaskRegistry:
         state.generation = generation
         state.status = TaskStatus.REMOTE
         state.pid = None
+        state.process_group_id = None
         state.paused_at_utc = None
         state.resume_at_utc = None
         state.resume_wall_at_utc = None
@@ -743,6 +758,7 @@ class PersistentTaskRegistry:
         state.generation = generation
         state.status = TaskStatus.STOPPED
         state.pid = None
+        state.process_group_id = None
         state.paused_at_utc = None
         state.resume_at_utc = None
         state.resume_wall_at_utc = None
@@ -793,6 +809,7 @@ class PersistentTaskRegistry:
         if status == TaskStatus.COMPLETED:
             state.status = TaskStatus.COMPLETED
             state.pid = None
+            state.process_group_id = None
             state.paused_at_utc = None
             state.resume_at_utc = None
             state.resume_wall_at_utc = None
@@ -806,6 +823,7 @@ class PersistentTaskRegistry:
         elif owner_node_id != self._local_node_id:
             state.status = TaskStatus.REMOTE
             state.pid = None
+            state.process_group_id = None
             state.paused_at_utc = None
             state.resume_at_utc = None
             state.resume_wall_at_utc = None

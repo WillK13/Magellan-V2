@@ -112,7 +112,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Magellan V2 Peer API",
-    version="0.9.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -189,9 +189,66 @@ async def health() -> dict:
         "adaptive_policy_state_file": str(
             context.adaptive_policy_store.path
         ),
+        "runtime_adapters": ["command", "dendro", "python_module"],
+        "configured_architecture": (
+            context.local_node.capabilities.architecture
+        ),
+        "observed_architecture": (
+            context.observed_capabilities.architecture
+        ),
         "timestamp_utc": datetime.now(
             timezone.utc
         ).isoformat(),
+    }
+
+
+@app.get("/capabilities")
+async def capabilities() -> dict:
+    configured = context.local_node.capabilities
+    observed = context.observed_capabilities
+    drift: list[str] = []
+    if (
+        configured.architecture is not None
+        and observed.architecture != configured.architecture
+    ):
+        drift.append(
+            f"configured architecture {configured.architecture}; "
+            f"observed {observed.architecture}"
+        )
+    if (
+        configured.operating_system is not None
+        and observed.operating_system != configured.operating_system
+    ):
+        drift.append(
+            f"configured operating system {configured.operating_system}; "
+            f"observed {observed.operating_system}"
+        )
+    missing_commands = configured.commands - observed.commands
+    if missing_commands:
+        drift.append(
+            f"configured commands missing locally: {sorted(missing_commands)}"
+        )
+    missing_features = configured.features - observed.features
+    if missing_features:
+        drift.append(
+            f"configured features missing locally: {sorted(missing_features)}"
+        )
+    for runtime, configured_version in configured.runtimes.items():
+        observed_version = observed.runtimes.get(runtime)
+        if observed_version is None:
+            drift.append(f"configured runtime missing locally: {runtime}")
+        elif not observed_version.startswith(configured_version):
+            drift.append(
+                f"configured {runtime} version {configured_version}; "
+                f"observed {observed_version}"
+            )
+    return {
+        "node_id": context.local_node.id,
+        "configured": configured.model_dump(mode="json"),
+        "observed": observed.model_dump(mode="json"),
+        "runtime_adapters": ["command", "dendro", "python_module"],
+        "drift": drift,
+        "ready": not drift,
     }
 
 

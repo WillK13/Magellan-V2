@@ -194,6 +194,8 @@ class BidStore:
         auction_rank: int | None = None,
         auction_credit_before: float = 0.0,
         resource_fit: bool | None = None,
+        compatibility_fit: bool | None = None,
+        compatibility_reasons: list[str] | None = None,
         auction_metrics: dict | None = None,
     ) -> BidRecord:
         if status not in {
@@ -232,6 +234,10 @@ class BidStore:
                 record.auction_credit_before
             )
             record.resource_fit = resource_fit
+            record.compatibility_fit = compatibility_fit
+            record.compatibility_reasons = list(
+                compatibility_reasons or []
+            )
             record.auction_metrics = dict(auction_metrics or {})
 
             if status == BidStatus.ACCEPTED:

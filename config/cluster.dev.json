@@ -25,6 +25,29 @@
         "memory_mb": 4096,
         "gpu_count": 0,
         "accelerator_types": []
+      },
+      "capabilities": {
+        "architecture": "x86_64",
+        "operating_system": "linux",
+        "cpu_cores": 2,
+        "memory_mb": 4096,
+        "gpu_count": 0,
+        "accelerator_types": [],
+        "commands": [
+          "bash",
+          "python3",
+          "rsync"
+        ],
+        "runtimes": {
+          "python": "3.11"
+        },
+        "features": [
+          "local-command",
+          "python-module",
+          "process-group",
+          "application-checkpoint",
+          "dendro-adapter"
+        ]
       }
     },
     {
@@ -46,6 +69,29 @@
         "memory_mb": 4096,
         "gpu_count": 0,
         "accelerator_types": []
+      },
+      "capabilities": {
+        "architecture": "x86_64",
+        "operating_system": "linux",
+        "cpu_cores": 2,
+        "memory_mb": 4096,
+        "gpu_count": 0,
+        "accelerator_types": [],
+        "commands": [
+          "bash",
+          "python3",
+          "rsync"
+        ],
+        "runtimes": {
+          "python": "3.11"
+        },
+        "features": [
+          "local-command",
+          "python-module",
+          "process-group",
+          "application-checkpoint",
+          "dendro-adapter"
+        ]
       }
     }
   ],

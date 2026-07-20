@@ -7,6 +7,7 @@ import json
 from pydantic import BaseModel, Field, model_validator
 
 from magellan.artifacts.models import StaticArtifactSpec
+from magellan.capabilities.models import TaskCompatibilityRequirements
 from magellan.models.types import TaskProfile, TaskResourceRequest
 from magellan.state.task_models import LocalProcessSpec, TaskDefinition
 
@@ -38,6 +39,9 @@ class TaskTemplateProfile(BaseModel):
     deadline_at_utc: datetime | None = None
     resource_request: TaskResourceRequest = Field(
         default_factory=TaskResourceRequest
+    )
+    compatibility: TaskCompatibilityRequirements = Field(
+        default_factory=TaskCompatibilityRequirements
     )
 
 

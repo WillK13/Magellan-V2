@@ -7,6 +7,8 @@ from pathlib import Path
 from magellan.bidding.arbiter import BidArbiter
 from magellan.bidding.client import BidClient
 from magellan.bidding.store import BidStore
+from magellan.capabilities.discovery import discover_local_capabilities
+from magellan.capabilities.models import NodeRuntimeCapabilities
 from magellan.carbon.store import CarbonStore
 from magellan.config.loader import (
     load_cluster_config,
@@ -98,6 +100,7 @@ class DaemonContext:
     telemetry_service: TelemetryService
     adaptive_policy_store: AdaptivePolicyStore
     adaptive_policy_service: AdaptivePolicyService
+    observed_capabilities: NodeRuntimeCapabilities
 
 
 def _task_files() -> list[Path]:
@@ -173,6 +176,7 @@ def build_daemon_context() -> DaemonContext:
         })
         policy = policy.model_copy(update={"auction": auction})
     local_node = cluster.get_node(node_id)
+    observed_capabilities = discover_local_capabilities(local_node)
 
     task_catalog = TaskCatalogStore(
         state_root=state_root,
@@ -243,6 +247,7 @@ def build_daemon_context() -> DaemonContext:
         repository_root=repository_root,
         artifact_manager=artifact_manager,
         completion_manager=completion_manager,
+        node_capabilities=observed_capabilities,
     )
     checkpoint_manager = CheckpointManager(
         registry=registry,
@@ -294,6 +299,7 @@ def build_daemon_context() -> DaemonContext:
         bid_window_seconds=cluster.bid_window_seconds,
         node_resources=local_node.resources,
         auction_policy=policy.auction,
+        node_capabilities=observed_capabilities,
     )
 
     transfer = RsyncCheckpointTransfer(
@@ -418,4 +424,5 @@ def build_daemon_context() -> DaemonContext:
         telemetry_service=telemetry_service,
         adaptive_policy_store=adaptive_policy_store,
         adaptive_policy_service=adaptive_policy_service,
+        observed_capabilities=observed_capabilities,
     )

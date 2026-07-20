@@ -1,0 +1,66 @@
+{
+  "definition_id": "dendro-bssn-validation",
+  "profile": {
+    "workload_type": "dendro-gr",
+    "power_kw": 0.12,
+    "checkpoint_bytes": 4096,
+    "data_bytes": 0,
+    "prestaged_node_ids": ["boston", "virginia"],
+    "estimated_remaining_seconds": 3600,
+    "accumulated_cost_usd": 0,
+    "cost_cap_usd": 1,
+    "priority": 20,
+    "deadline_at_utc": null,
+    "resource_request": {
+      "cpu_cores": 1,
+      "memory_mb": 512,
+      "gpu_count": 0,
+      "accelerator_type": null
+    },
+    "compatibility": {
+      "architectures": ["x86_64"],
+      "operating_systems": ["linux"],
+      "minimum_cpu_cores": 1,
+      "minimum_memory_mb": 512,
+      "required_commands": ["python3"],
+      "required_runtimes": {"python": ">=3.11,<3.12"},
+      "required_features": [
+        "local-command",
+        "process-group",
+        "application-checkpoint",
+        "dendro-adapter"
+      ],
+      "checkpoint_architecture_independent": false,
+      "requires_same_mpi_world_size": true
+    }
+  },
+  "runtime": {
+    "adapter": "dendro",
+    "command": ["python3", "-m", "magellan.workloads.dendro_mock"],
+    "arguments": [
+      "--checkpoint-file", "{checkpoint_file}",
+      "--checkpoint-manifest", "{checkpoint_manifest_file}",
+      "--progress-file", "{progress_file}",
+      "--completion-file", "{completion_file}",
+      "--readiness-file", "{readiness_file}",
+      "--output-dir", "{output_directory}",
+      "--world-size", "2",
+      "--max-step", "300",
+      "--interval-seconds", "0.2",
+      "--checkpoint-every", "5"
+    ],
+    "resume_arguments": ["--resume"],
+    "environment": {},
+    "working_directory": ".",
+    "checkpoint_relative_path": "checkpoint/dendro-state.json",
+    "checkpoint_manifest_relative_path": "manifest.json",
+    "readiness_relative_path": "runtime/ready.json",
+    "readiness_timeout_seconds": 30,
+    "progress_relative_path": "runtime/progress.json",
+    "completion_relative_path": "runtime/completion.json",
+    "output_relative_directory": "output",
+    "stop_timeout_seconds": 10,
+    "minimum_process_count": 3
+  },
+  "artifacts": []
+}

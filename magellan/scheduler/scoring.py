@@ -33,6 +33,7 @@ def build_raw_actions(
     static_data_bytes_by_destination: (
         dict[str, int] | None
     ) = None,
+    compatible_destination_ids: set[str] | None = None,
 ) -> list[RawActionEstimate]:
     now = as_utc_timestamp(at_utc)
     source = cluster.get_node(task.current_node_id)
@@ -62,6 +63,11 @@ def build_raw_actions(
         estimates.append(pause_estimate)
 
     for destination in graph.peers(source.id):
+        if (
+            compatible_destination_ids is not None
+            and destination.id not in compatible_destination_ids
+        ):
+            continue
         edge = graph.edge(source.id, destination.id)
         
         static_data_bytes_override = None
@@ -298,6 +304,7 @@ def evaluate_task(
     static_data_bytes_by_destination: dict[str, int] | None = None,
     adaptive_service: AdaptivePolicyService | None = None,
     telemetry_confidence: float = 0.0,
+    compatible_destination_ids: set[str] | None = None,
 ) -> DecisionResult:
     estimates = build_raw_actions(
         task=task,
@@ -309,6 +316,7 @@ def evaluate_task(
         static_data_bytes_by_destination=(
             static_data_bytes_by_destination
         ),
+        compatible_destination_ids=compatible_destination_ids,
     )
 
     adaptive_context = None

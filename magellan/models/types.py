@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from magellan.capabilities.models import TaskCompatibilityRequirements
+
 
 class ActionType(str, Enum):
     CONTINUE = "continue"
@@ -46,6 +48,9 @@ class TaskProfile(BaseModel):
     deadline_at_utc: datetime | None = None
     resource_request: TaskResourceRequest = Field(
         default_factory=TaskResourceRequest
+    )
+    compatibility: TaskCompatibilityRequirements = Field(
+        default_factory=TaskCompatibilityRequirements
     )
 
 

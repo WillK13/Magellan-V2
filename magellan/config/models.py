@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from magellan.capabilities.models import NodeRuntimeCapabilities
+
 from pydantic import (
     BaseModel,
     Field,
@@ -50,6 +52,9 @@ class NodeConfig(BaseModel):
     capacity: int = Field(default=1, ge=1)
     resources: NodeResourceCapacity = Field(
         default_factory=NodeResourceCapacity
+    )
+    capabilities: NodeRuntimeCapabilities = Field(
+        default_factory=NodeRuntimeCapabilities
     )
     pue: float = Field(default=1.2, ge=1)
     compute_price_usd_per_hour: float = Field(default=0.0, ge=0)

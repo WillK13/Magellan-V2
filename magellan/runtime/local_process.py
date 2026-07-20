@@ -3,18 +3,21 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from magellan.artifacts.manager import ArtifactManager
+from magellan.capabilities.checker import check_compatibility
+from magellan.capabilities.models import NodeRuntimeCapabilities
+from magellan.runtime.adapters import RuntimeAdapterRegistry
 from magellan.runtime.completion import (
     CompletionManager,
 )
 from magellan.state.persistent_registry import (
     PersistentTaskRegistry,
 )
+from magellan.telemetry.process import ProcfsProcessSampler
 from magellan.state.task_models import (
     TaskRuntimeState,
     TaskStatus,
@@ -72,6 +75,8 @@ class LocalProcessRuntime:
         repository_root: str | Path,
         artifact_manager: ArtifactManager,
         completion_manager: CompletionManager,
+        adapter_registry: RuntimeAdapterRegistry | None = None,
+        node_capabilities: NodeRuntimeCapabilities | None = None,
     ) -> None:
         self._registry = registry
         self._local_node_id = local_node_id
@@ -79,6 +84,10 @@ class LocalProcessRuntime:
         self._processes: dict[str, subprocess.Popen] = {}
         self._artifact_manager = artifact_manager
         self._completion_manager = completion_manager
+        self._adapter_registry = adapter_registry or RuntimeAdapterRegistry()
+        self._node_capabilities = (
+            node_capabilities or NodeRuntimeCapabilities()
+        )
 
     def _render_argument(
         self,
@@ -88,6 +97,10 @@ class LocalProcessRuntime:
         completion_file = self._registry.completion_file(task_id)
         output_directory = self._registry.output_directory(task_id)
         progress_file = self._registry.progress_file(task_id)
+        readiness_file = self._registry.readiness_file(task_id)
+        checkpoint_manifest_file = (
+            self._registry.checkpoint_manifest_file(task_id)
+        )
 
         return value.format(
             task_id=task_id,
@@ -119,12 +132,31 @@ class LocalProcessRuntime:
                 if progress_file is not None
                 else ""
             ),
+            readiness_file=(
+                str(readiness_file)
+                if readiness_file is not None
+                else ""
+            ),
+            checkpoint_manifest_file=(
+                str(checkpoint_manifest_file)
+                if checkpoint_manifest_file is not None
+                else ""
+            ),
         )
 
     def start(self, task_id: str) -> TaskRuntimeState:
         self._artifact_manager.ensure_task_artifacts(task_id)
         definition = self._registry.get_definition(task_id)
         state = self._registry.get_state(task_id)
+        compatibility = check_compatibility(
+            definition.profile.compatibility,
+            self._node_capabilities,
+        )
+        if not compatibility.compatible:
+            raise RuntimeError(
+                "Local node is incompatible with task runtime: "
+                + "; ".join(compatibility.reasons)
+            )
 
         if state.owner_node_id != self._local_node_id:
             raise RuntimeError(
@@ -166,20 +198,18 @@ class LocalProcessRuntime:
         logs_directory.mkdir(parents=True, exist_ok=True)
         log_path = logs_directory / "process.log"
 
-        arguments = [
-            self._render_argument(task_id, argument)
-            for argument in definition.runtime.arguments
-        ]
-
-        command = [
-            sys.executable,
-            "-m",
-            definition.runtime.module,
-            *arguments,
-        ]
+        adapter = self._adapter_registry.get(definition.runtime.adapter)
+        launch_plan = adapter.build_launch_plan(
+            spec=definition.runtime,
+            render=lambda value: self._render_argument(task_id, value),
+            checkpoint_directory=self._registry.checkpoint_directory(task_id),
+            checkpoint_file=checkpoint_file,
+        )
+        command = launch_plan.command
 
         environment = os.environ.copy()
         environment.update(definition.runtime.environment)
+        environment.update(launch_plan.environment or {})
         environment["PYTHONUNBUFFERED"] = "1"
         environment["MAGELLAN_TASK_ID"] = task_id
         environment["MAGELLAN_NODE_ID"] = self._local_node_id
@@ -243,11 +273,16 @@ class LocalProcessRuntime:
         state = self._registry.mark_running(
             task_id=task_id,
             pid=process.pid,
+            runtime_adapter=launch_plan.adapter,
+            launch_command=launch_plan.command,
+            resumed_from_checkpoint=launch_plan.resumed_from_checkpoint,
         )
 
         print(
             f"[runtime-start] task={task_id} "
-            f"pid={process.pid} node={self._local_node_id}",
+            f"pid={process.pid} adapter={launch_plan.adapter} "
+            f"resumed={launch_plan.resumed_from_checkpoint} "
+            f"node={self._local_node_id}",
             flush=True,
         )
 
@@ -519,6 +554,38 @@ class LocalProcessRuntime:
 
         return events
 
+    @staticmethod
+    def _process_group_count(process_group_id: int) -> int:
+        try:
+            return ProcfsProcessSampler().sample(
+                process_group_id
+            ).process_count
+        except Exception:
+            # macOS and other non-procfs platforms can still enumerate the
+            # processes in a POSIX process group through ``ps``. This keeps
+            # MPI/Dendro readiness checks meaningful outside Linux while the
+            # final fallback preserves leader-only behavior on minimal hosts.
+            pass
+
+        try:
+            result = subprocess.run(
+                ["ps", "-axo", "pgid="],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            count = 0
+            for raw_value in result.stdout.splitlines():
+                try:
+                    pgid = int(raw_value.strip())
+                except ValueError:
+                    continue
+                if pgid == process_group_id:
+                    count += 1
+            return max(count, 1)
+        except (OSError, subprocess.SubprocessError):
+            return 1
+
     def _wait_for_readiness(
         self,
         task_id: str,
@@ -526,36 +593,33 @@ class LocalProcessRuntime:
     ) -> None:
         definition = self._registry.get_definition(task_id)
         readiness_file = self._registry.readiness_file(task_id)
-
-        if readiness_file is None:
-            time.sleep(0.25)
-
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"Task {task_id} exited immediately "
-                    f"with code {process.returncode}"
-                )
-
-            return
-
         deadline = (
             time.monotonic()
             + definition.runtime.readiness_timeout_seconds
         )
 
         while time.monotonic() < deadline:
-            if readiness_file.is_file():
-                return
-
             if process.poll() is not None:
                 raise RuntimeError(
                     f"Task {task_id} exited before becoming ready "
                     f"with code {process.returncode}"
                 )
 
+            marker_ready = (
+                readiness_file is None or readiness_file.is_file()
+            )
+            process_count = self._process_group_count(process.pid)
+            process_tree_ready = (
+                process_count >= definition.runtime.minimum_process_count
+            )
+
+            if marker_ready and process_tree_ready:
+                return
+
             time.sleep(0.25)
 
         raise TimeoutError(
             f"Task {task_id} did not become ready within "
-            f"{definition.runtime.readiness_timeout_seconds}s"
+            f"{definition.runtime.readiness_timeout_seconds}s; "
+            f"required_processes={definition.runtime.minimum_process_count}"
         )

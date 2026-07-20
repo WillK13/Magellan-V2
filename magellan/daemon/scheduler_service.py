@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from magellan.capabilities.checker import check_compatibility
 from magellan.bidding.client import BidClient
 from magellan.bidding.models import (
     BidRequest,
@@ -140,6 +141,7 @@ class SchedulerService:
             accumulated_cost_usd=task.accumulated_cost_usd,
             cost_cap_usd=task.cost_cap_usd,
             resource_request=task.resource_request,
+            compatibility=task.compatibility,
             fallback_action=(
                 fallback.action if fallback is not None else None
             ),
@@ -173,6 +175,24 @@ class SchedulerService:
                 else "unavailable"
             ),
         )
+
+    def _compatible_destinations(self, task) -> set[str]:
+        compatible: set[str] = set()
+        for destination in self._graph.peers(self._local_node.id):
+            result = check_compatibility(
+                task.compatibility,
+                destination.capabilities,
+            )
+            if result.compatible:
+                compatible.add(destination.id)
+            else:
+                print(
+                    f"[compatibility-prune] task={task.task_id} "
+                    f"destination={destination.id} "
+                    f"reasons={'; '.join(result.reasons)}",
+                    flush=True,
+                )
+        return compatible
 
     def _task_operation_lock(self, task_id: str) -> asyncio.Lock:
         """Serialize scheduler and operator actions for one task."""
@@ -241,11 +261,14 @@ class SchedulerService:
             flush=True,
         )
 
+        compatible_destination_ids = self._compatible_destinations(task)
         static_data_bytes_by_destination: dict[str, int] = {}
 
         for destination in self._graph.peers(
             self._local_node.id
         ):
+            if destination.id not in compatible_destination_ids:
+                continue
             missing_bytes = (
                 await self._prefetch_service.missing_bytes(
                     task_id=task_id,
@@ -285,6 +308,7 @@ class SchedulerService:
             ),
             adaptive_service=self._adaptive_policy_service,
             telemetry_confidence=telemetry_confidence,
+            compatible_destination_ids=compatible_destination_ids,
         )
 
         print(
@@ -543,6 +567,17 @@ class SchedulerService:
                 "Destination must differ from the local node"
             )
 
+        definition = self._registry.get_definition(task_id)
+        compatibility = check_compatibility(
+            definition.profile.compatibility,
+            self._cluster.get_node(destination_node_id).capabilities,
+        )
+        if not compatibility.compatible:
+            raise RuntimeError(
+                "Incompatible migration destination: "
+                + "; ".join(compatibility.reasons)
+            )
+
         checkpoint_summary = await asyncio.to_thread(
             self._checkpoint_manager.validate,
             task_id,
@@ -568,6 +603,7 @@ class SchedulerService:
             static_data_bytes_by_destination={
                 destination_node_id: missing_bytes,
             },
+            compatible_destination_ids={destination_node_id},
         )
 
         candidate = next(

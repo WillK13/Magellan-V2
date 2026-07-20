@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Literal
 from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
@@ -54,8 +55,18 @@ class TaskAccountingSnapshot(BaseModel):
 
 
 class LocalProcessSpec(BaseModel):
-    module: str = Field(min_length=1)
+    """Portable runtime contract for Python modules and local commands.
+
+    ``python_module`` preserves the original Magellan V2 behavior. ``command``
+    launches an arbitrary executable. ``dendro`` is a command runtime with an
+    application-checkpoint restart contract and optional resume arguments.
+    """
+
+    adapter: Literal["python_module", "command", "dendro"] = "python_module"
+    module: str | None = None
+    command: list[str] = Field(default_factory=list)
     arguments: list[str] = Field(default_factory=list)
+    resume_arguments: list[str] = Field(default_factory=list)
     environment: dict[str, str] = Field(default_factory=dict)
 
     working_directory: str = "."
@@ -80,37 +91,45 @@ class LocalProcessSpec(BaseModel):
     output_relative_directory: str | None = None
 
     stop_timeout_seconds: float = Field(default=10.0, gt=0)
+    minimum_process_count: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
-    def validate_relative_paths(self) -> "LocalProcessSpec":
+    def validate_runtime(self) -> "LocalProcessSpec":
+        if self.adapter == "python_module":
+            if not self.module:
+                raise ValueError("python_module runtime requires module")
+            if self.command:
+                raise ValueError("python_module runtime cannot define command")
+        else:
+            if not self.command:
+                raise ValueError(f"{self.adapter} runtime requires command")
+            if self.module is not None:
+                raise ValueError(f"{self.adapter} runtime cannot define module")
+
+        if self.adapter != "dendro" and self.resume_arguments:
+            raise ValueError("resume_arguments are only valid for dendro runtime")
+
         values = {
             "checkpoint_relative_path": self.checkpoint_relative_path,
             "readiness_relative_path": self.readiness_relative_path,
             "progress_relative_path": self.progress_relative_path,
             "completion_relative_path": self.completion_relative_path,
             "output_relative_directory": self.output_relative_directory,
+            "working_directory": self.working_directory,
         }
 
         for name, raw in values.items():
             if raw is None:
                 continue
-
             path = Path(raw)
-
             if path.is_absolute() or ".." in path.parts:
-                raise ValueError(
-                    f"{name} must be a safe relative path"
-                )
+                raise ValueError(f"{name} must be a safe relative path")
 
         if self.checkpoint_manifest_relative_path is not None:
-            manifest = Path(
-                self.checkpoint_manifest_relative_path
-            )
-
+            manifest = Path(self.checkpoint_manifest_relative_path)
             if manifest.is_absolute() or ".." in manifest.parts:
                 raise ValueError(
-                    "checkpoint_manifest_relative_path must be "
-                    "a safe relative path"
+                    "checkpoint_manifest_relative_path must be a safe relative path"
                 )
 
         return self
@@ -145,6 +164,10 @@ class TaskRuntimeState(BaseModel):
     generation: int = Field(default=0, ge=0)
     status: TaskStatus
     pid: int | None = Field(default=None, ge=1)
+    process_group_id: int | None = Field(default=None, ge=1)
+    runtime_adapter: str | None = None
+    launch_command: list[str] = Field(default_factory=list)
+    resumed_from_checkpoint: bool = False
 
     last_migration_id: str | None = None
 
