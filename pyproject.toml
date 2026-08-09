@@ -20,7 +20,7 @@ dependencies = [
 dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.25,<1",
-    "ruff>=0.9,<1",
+    "ruff==0.15.21",
     "mypy>=1.14,<2"
 ]
 llm = [

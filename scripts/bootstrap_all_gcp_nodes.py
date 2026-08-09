@@ -24,6 +24,14 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+def remote_cd(path: str) -> str:
+    """Render a safe remote cd command while preserving $HOME expansion."""
+    if path == "~":
+        return 'cd "$HOME"'
+    if path.startswith("~/"):
+        relative = path[2:]
+        return f'cd "$HOME"/{shlex.quote(relative)}'
+    return f"cd {shlex.quote(path)}"
 
 def main() -> int:
     args = parse_args()
@@ -32,7 +40,7 @@ def main() -> int:
     for node in cluster.nodes:
         remote = " ".join(
             [
-                f"cd {shlex.quote(args.remote_repo)}",
+                remote_cd(args.remote_repo),               
                 "&&",
                 f"MAGELLAN_BRANCH={shlex.quote(args.branch)}",
                 f"MAGELLAN_BOOTSTRAP_RUN_TESTS={'0' if args.skip_tests else '1'}",
