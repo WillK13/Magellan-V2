@@ -33,7 +33,7 @@ def main() -> int:
 
     for node in cluster.nodes:
         remote = (
-            remote_cd(args.remote_repo),
+            f"{remote_cd(args.remote_repo)} && "
             f"scripts/install_magellan_systemd.sh {shlex.quote(node.id)}"
         )
         command = [
