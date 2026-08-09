@@ -338,3 +338,31 @@ Other subsystem validators are available under `scripts/`.
 The current release uses application-level checkpoints. Future extensions include JAX/Orbax, SLURM, CRIU, GPU-state migration, and live Electricity Maps ingestion.
 
 Detailed design documentation is under `docs/design/` and `docs/milestones/`.
+
+## Seven-node GCP deployment
+
+The production topology is defined in `config/cluster.gcp.json`. Before starting all seven daemons, validate the local carbon traces and live VM metadata:
+
+```bash
+python scripts/validate_seven_node_deployment.py
+python scripts/audit_gcp_cluster.py
+```
+
+Bootstrap and synchronize the cluster:
+
+```bash
+python scripts/bootstrap_all_gcp_nodes.py
+python scripts/sync_datasets_to_gcp.py
+python scripts/bootstrap_all_gcp_nodes.py --skip-tests --validate-datasets
+python scripts/install_all_gcp_services.py
+```
+
+Then, from Boston, validate all 42 directed peer paths:
+
+```bash
+python scripts/validate_seven_node_mesh.py \
+  --local-node-id boston \
+  --ssh-user WILL
+```
+
+See `docs/milestones/seven-node-deployment.md` for the full deployment sequence.
