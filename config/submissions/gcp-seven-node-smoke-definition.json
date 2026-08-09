@@ -1,0 +1,53 @@
+{
+  "definition_id": "gcp-seven-node-autonomous-smoke",
+  "profile": {
+    "workload_type": "counter",
+    "power_kw": 0.1,
+    "checkpoint_bytes": 1024,
+    "data_bytes": 0,
+    "prestaged_node_ids": [
+      "boston", "california", "south-australia", "nepal",
+      "ethiopia", "france", "virginia"
+    ],
+    "estimated_remaining_seconds": 180,
+    "accumulated_cost_usd": 0,
+    "cost_cap_usd": 1.0,
+    "priority": 20,
+    "deadline_at_utc": null,
+    "resource_request": {
+      "cpu_cores": 1,
+      "memory_mb": 256,
+      "gpu_count": 0,
+      "accelerator_type": null
+    },
+    "compatibility": {
+      "architectures": ["x86_64"],
+      "operating_systems": ["linux"],
+      "minimum_cpu_cores": 1,
+      "minimum_memory_mb": 256,
+      "required_commands": ["python3"],
+      "required_runtimes": {"python": ">=3.11,<3.12"},
+      "required_features": ["python-module", "application-checkpoint"],
+      "checkpoint_architecture_independent": true
+    }
+  },
+  "runtime": {
+    "module": "magellan.workloads.counter",
+    "arguments": [
+      "--checkpoint-file", "{checkpoint_file}",
+      "--interval-seconds", "0.5",
+      "--max-value", "300",
+      "--progress-file", "{progress_file}",
+      "--completion-file", "{completion_file}",
+      "--output-dir", "{output_directory}"
+    ],
+    "environment": {},
+    "working_directory": ".",
+    "checkpoint_relative_path": "checkpoint/counter.json",
+    "progress_relative_path": "runtime/progress.json",
+    "completion_relative_path": "runtime/completion.json",
+    "output_relative_directory": "output",
+    "stop_timeout_seconds": 10
+  },
+  "artifacts": []
+}
