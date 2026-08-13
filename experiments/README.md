@@ -8,3 +8,10 @@ summary, and SHA-256 checksum file.
 The first validation workload is a checkpointable counter. It exists only to verify
 that the measurement pipeline can reconstruct autonomous scheduling decisions and
 migration outcomes before paper experiments begin.
+
+## Offline baseline comparisons
+
+`experiments/comparisons/` contains Stage-2 baseline/oracle bundles. These are offline
+policy-model comparisons over the same carbon traces and are intentionally separated
+from measured `experiments/runs/` bundles. Final paper analyses should identify which
+rows are measured-system results and which are offline reference policies.

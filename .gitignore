@@ -24,3 +24,5 @@ __pycache__/
 *.py[cod]
 experiments/runs/*
 !experiments/runs/.gitkeep
+experiments/comparisons/*
+!experiments/comparisons/.gitkeep
