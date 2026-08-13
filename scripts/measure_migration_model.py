@@ -638,7 +638,14 @@ def main() -> int:
             ),
         },
         "initial_health": health,
-        "definitions": definitions,
+        "definitions": [
+            {
+                "source_node_id": source_id,
+                "checkpoint_bytes": payload_bytes,
+                **definition,
+            }
+            for (source_id, payload_bytes), definition in sorted(definitions.items())
+        ],
     }
     write_json(bundle / "metadata.json", metadata)
     write_csv(bundle / "migration_samples.csv", rows, list(rows[0].keys()))
