@@ -73,6 +73,47 @@ def write_progress(
     )
 
 
+def ensure_checkpoint_padding(
+    checkpoint_path: Path,
+    padding_bytes: int,
+    chunk_bytes: int = 1024 * 1024,
+) -> Path | None:
+    if padding_bytes <= 0:
+        return None
+
+    padding_path = checkpoint_path.parent / "payload.bin"
+    if padding_path.is_file() and padding_path.stat().st_size == padding_bytes:
+        return padding_path
+
+    padding_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = padding_path.with_suffix(".bin.tmp")
+    remaining = padding_bytes
+    with temporary.open("wb") as handle:
+        while remaining > 0:
+            size = min(chunk_bytes, remaining)
+            handle.write(os.urandom(size))
+            remaining -= size
+    os.replace(temporary, padding_path)
+    return padding_path
+
+
+def completion_target(
+    *,
+    current_value: int,
+    configured_max_value: int | None,
+    current_node_id: str,
+    initial_node_id: str | None,
+    complete_after_migration_steps: int | None,
+) -> int | None:
+    if initial_node_id is None or complete_after_migration_steps is None:
+        return configured_max_value
+    if current_node_id == initial_node_id:
+        return configured_max_value
+    if complete_after_migration_steps < 1:
+        raise ValueError("--complete-after-migration-steps must be positive")
+    return current_value + complete_after_migration_steps
+
+
 def load_value(path: Path) -> int:
     if not path.exists():
         return 0
@@ -90,7 +131,18 @@ def main() -> None:
         default=1.0,
     )
     parser.add_argument(
+        "--checkpoint-padding-bytes",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
         "--max-value",
+        type=int,
+        default=None,
+    )
+    parser.add_argument("--initial-node-id", default=None)
+    parser.add_argument(
+        "--complete-after-migration-steps",
         type=int,
         default=None,
     )
@@ -133,7 +185,27 @@ def main() -> None:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
 
+    if args.checkpoint_padding_bytes < 0:
+        raise ValueError("--checkpoint-padding-bytes must be non-negative")
+    padding_path = ensure_checkpoint_padding(
+        checkpoint_path,
+        args.checkpoint_padding_bytes,
+    )
     value = load_value(checkpoint_path)
+    current_node_id = os.getenv("MAGELLAN_NODE_ID", "unknown")
+    effective_max_value = completion_target(
+        current_value=value,
+        configured_max_value=args.max_value,
+        current_node_id=current_node_id,
+        initial_node_id=args.initial_node_id,
+        complete_after_migration_steps=args.complete_after_migration_steps,
+    )
+
+    if padding_path is not None:
+        print(
+            f"[counter] checkpoint-padding bytes={padding_path.stat().st_size}",
+            flush=True,
+        )
 
     print(
         f"[counter] resumed value={value} "
@@ -144,11 +216,11 @@ def main() -> None:
     write_progress(
         progress_path,
         value,
-        args.max_value,
+        effective_max_value,
     )
 
     while not stop_requested:
-        if args.max_value is not None and value >= args.max_value:
+        if effective_max_value is not None and value >= effective_max_value:
             break
 
         value += 1
@@ -156,7 +228,7 @@ def main() -> None:
         write_progress(
             progress_path,
             value,
-            args.max_value,
+            effective_max_value,
         )
 
         print(
@@ -171,13 +243,13 @@ def main() -> None:
     write_progress(
         progress_path,
         value,
-        args.max_value,
+        effective_max_value,
     )
 
     natural_completion = (
         not stop_requested
-        and args.max_value is not None
-        and value >= args.max_value
+        and effective_max_value is not None
+        and value >= effective_max_value
     )
 
     if natural_completion:

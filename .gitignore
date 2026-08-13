@@ -26,3 +26,5 @@ experiments/runs/*
 !experiments/runs/.gitkeep
 experiments/comparisons/*
 !experiments/comparisons/.gitkeep
+experiments/measurements/*
+!experiments/measurements/.gitkeep

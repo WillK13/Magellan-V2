@@ -23,3 +23,12 @@ NSDI comparisons use Electricity Maps' life-cycle intensity column; direct
 operational intensity is retained for sensitivity analysis. Every generated bundle
 records both the metric name and exact source column. Magellan daemons retain the
 v1.2-compatible `direct` default unless `MAGELLAN_CARBON_METRIC` is explicitly set.
+
+## Real-system measurement bundles
+
+`experiments/measurements/` contains Stage-3 real-system characterization bundles.
+These are not policy-comparison results. They isolate the physical/model inputs that
+Magellan later relies on: directed WAN RTT/bandwidth and controlled migration timing.
+Use `scripts/set_seven_node_service_mode.py measure` before collecting them so all
+seven daemons run against isolated `runtime-state-gcp-measurement` state with
+life-cycle carbon accounting.
