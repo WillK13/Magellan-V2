@@ -207,6 +207,7 @@ def main() -> int:
     started_at_utc = utc_now_iso()
     event_baselines: dict[str, int] = {}
     initial_health: dict[str, dict[str, Any]] = {}
+    carbon_accounting: dict[str, str] | None = None
 
     print("== Verify identical Git commit across seven nodes ==")
     cluster_git = cluster_git_snapshot(
@@ -237,9 +238,27 @@ def main() -> int:
                 f"{node.id} policy mismatch: active={active_policy.get('baseline_weights')} "
                 f"expected={expected_weights}"
             )
+        node_carbon = {
+            "metric": str(event_status.get("carbon_metric", "")),
+            "column": str(event_status.get("carbon_column", "")),
+        }
+        if not node_carbon["metric"] or not node_carbon["column"]:
+            raise RuntimeError(f"{node.id} does not report its carbon metric")
+        if health.get("carbon_metric") != node_carbon["metric"]:
+            raise RuntimeError(f"{node.id} health/event carbon metric mismatch")
+        if carbon_accounting is None:
+            carbon_accounting = node_carbon
+        elif node_carbon != carbon_accounting:
+            raise RuntimeError(
+                f"Carbon accounting mismatch: {node.id}={node_carbon} "
+                f"expected={carbon_accounting}"
+            )
         event_baselines[node.id] = int(event_status.get("last_sequence", 0))
         initial_health[node.id] = health
-        print(f"[OK] {node.id:16} event_sequence={event_baselines[node.id]}")
+        print(
+            f"[OK] {node.id:16} event_sequence={event_baselines[node.id]} "
+            f"carbon={node_carbon['metric']}"
+        )
 
     created = request_json(
         f"{initial_api}/task-definitions",
@@ -399,6 +418,7 @@ def main() -> int:
             "definition": file_record(args.definition),
             "datasets": dataset_records,
         },
+        "carbon_accounting": carbon_accounting,
         "cluster": {
             "node_ids": [node.id for node in cluster.nodes],
             "api_port": cluster.api_port,

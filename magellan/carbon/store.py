@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 
 import pandas as pd
@@ -13,7 +14,20 @@ from magellan.carbon.forecast import (
 
 
 TIME_COLUMN = "Datetime (UTC)"
-CARBON_COLUMN = "Carbon intensity gCO₂eq/kWh (direct)"
+DIRECT_CARBON_COLUMN = "Carbon intensity gCO₂eq/kWh (direct)"
+LIFECYCLE_CARBON_COLUMN = "Carbon intensity gCO₂eq/kWh (Life cycle)"
+CARBON_COLUMN = DIRECT_CARBON_COLUMN
+
+
+class CarbonMetric(str, Enum):
+    DIRECT = "direct"
+    LIFECYCLE = "lifecycle"
+
+    @property
+    def column(self) -> str:
+        if self is CarbonMetric.DIRECT:
+            return DIRECT_CARBON_COLUMN
+        return LIFECYCLE_CARBON_COLUMN
 
 
 def as_utc_timestamp(value: str | pd.Timestamp) -> pd.Timestamp:
@@ -30,9 +44,12 @@ class CarbonStore:
         self,
         cluster: ClusterConfig,
         datasets_directory: str | Path,
+        carbon_metric: CarbonMetric | str = CarbonMetric.DIRECT,
     ) -> None:
         self._cluster = cluster
         self._datasets_directory = Path(datasets_directory)
+        self._carbon_metric = CarbonMetric(carbon_metric)
+        self._carbon_column = self._carbon_metric.column
         self._series_by_node_id: dict[str, pd.Series] = {}
 
         file_cache: dict[str, pd.Series] = {}
@@ -40,12 +57,23 @@ class CarbonStore:
         for node in cluster.nodes:
             if node.dataset_file not in file_cache:
                 file_path = self._datasets_directory / node.dataset_file
-                file_cache[node.dataset_file] = self._load_series(file_path)
+                file_cache[node.dataset_file] = self._load_series(
+                    file_path,
+                    self._carbon_column,
+                )
 
             self._series_by_node_id[node.id] = file_cache[node.dataset_file]
 
+    @property
+    def carbon_metric(self) -> CarbonMetric:
+        return self._carbon_metric
+
+    @property
+    def carbon_column(self) -> str:
+        return self._carbon_column
+
     @staticmethod
-    def _load_series(csv_path: Path) -> pd.Series:
+    def _load_series(csv_path: Path, carbon_column: str) -> pd.Series:
         if not csv_path.is_file():
             raise FileNotFoundError(f"Carbon CSV does not exist: {csv_path}")
 
@@ -53,7 +81,7 @@ class CarbonStore:
 
         missing = {
             TIME_COLUMN,
-            CARBON_COLUMN,
+            carbon_column,
         } - set(frame.columns)
 
         if missing:
@@ -62,7 +90,7 @@ class CarbonStore:
             )
 
         timestamps = pd.to_datetime(frame[TIME_COLUMN], utc=True, errors="raise")
-        values = pd.to_numeric(frame[CARBON_COLUMN], errors="raise")
+        values = pd.to_numeric(frame[carbon_column], errors="raise")
 
         series = pd.Series(values.to_numpy(), index=timestamps).sort_index()
 

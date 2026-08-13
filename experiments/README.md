@@ -15,3 +15,11 @@ migration outcomes before paper experiments begin.
 policy-model comparisons over the same carbon traces and are intentionally separated
 from measured `experiments/runs/` bundles. Final paper analyses should identify which
 rows are measured-system results and which are offline reference policies.
+
+## Carbon accounting
+
+Experiment tooling treats the carbon-intensity series as an explicit input. Primary
+NSDI comparisons use Electricity Maps' life-cycle intensity column; direct
+operational intensity is retained for sensitivity analysis. Every generated bundle
+records both the metric name and exact source column. Magellan daemons retain the
+v1.2-compatible `direct` default unless `MAGELLAN_CARBON_METRIC` is explicitly set.

@@ -133,6 +133,8 @@ async def health() -> dict:
         "zone": context.local_node.zone,
         "internal_ip": str(context.local_node.internal_ip),
         "carbon_region": context.local_node.carbon_region,
+        "carbon_metric": context.carbon_store.carbon_metric.value,
+        "carbon_column": context.carbon_store.carbon_column,
         "capacity": context.local_node.capacity,
         "epoch_seconds": context.cluster.epoch_seconds,
         "auction_strategy": auction_status["strategy"],
@@ -609,6 +611,8 @@ async def experiment_event_status() -> dict:
         "node_id": context.local_node.id,
         "last_sequence": context.experiment_journal.last_sequence,
         "path": str(context.experiment_journal.path),
+        "carbon_metric": context.carbon_store.carbon_metric.value,
+        "carbon_column": context.carbon_store.carbon_column,
     }
 
 

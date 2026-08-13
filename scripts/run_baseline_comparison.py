@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +26,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cluster", default="config/cluster.gcp.json")
     parser.add_argument("--policy", default="config/policy.prod.json")
     parser.add_argument("--datasets", default="datasets")
+    parser.add_argument(
+        "--carbon-metric",
+        choices=("lifecycle", "direct"),
+        default="lifecycle",
+        help=(
+            "Carbon-intensity series used for accounting and forecasts. "
+            "NSDI experiment comparisons default to life-cycle intensity; "
+            "use direct for operational-carbon sensitivity runs."
+        ),
+    )
     parser.add_argument("--start-utc", default="2024-01-02T00:00:00Z")
     parser.add_argument("--duration-seconds", type=float, default=14_400.0)
     parser.add_argument("--power-kw", type=float, default=0.08)
@@ -64,7 +73,11 @@ def main() -> int:
     cluster = load_cluster_config(args.cluster)
     policy = load_policy_config(args.policy)
     datasets = Path(args.datasets)
-    carbon_store = CarbonStore(cluster, datasets)
+    carbon_store = CarbonStore(
+        cluster,
+        datasets,
+        carbon_metric=args.carbon_metric,
+    )
     start = pd.Timestamp(args.start_utc)
     if start.tzinfo is None:
         start = start.tz_localize("UTC")
@@ -82,6 +95,10 @@ def main() -> int:
     )
 
     print("== Stage 2 baseline + oracle comparison ==")
+    print(
+        f"carbon_metric={carbon_store.carbon_metric.value} "
+        f"column={carbon_store.carbon_column}"
+    )
     print(f"start={start.isoformat()} duration={workload.duration_seconds:g}s")
     print(
         f"workload power={workload.power_kw:g}kW "
@@ -120,6 +137,11 @@ def main() -> int:
             "sha256": sha256_file(args.policy),
         },
         "datasets": dataset_identity(cluster, datasets),
+        "carbon_accounting": {
+            "metric": carbon_store.carbon_metric.value,
+            "column": carbon_store.carbon_column,
+            "units": "gCO2eq/kWh",
+        },
         "start_utc": start.isoformat(),
         "workload": workload.model_dump(mode="json"),
         "oracle": {

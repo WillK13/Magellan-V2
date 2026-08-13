@@ -133,6 +133,10 @@ def build_daemon_context() -> DaemonContext:
         "MAGELLAN_DATASETS",
         "datasets",
     )
+    carbon_metric = os.getenv(
+        "MAGELLAN_CARBON_METRIC",
+        "direct",
+    ).strip().lower()
     state_root = Path(
         os.getenv(
             "MAGELLAN_STATE_ROOT",
@@ -235,6 +239,7 @@ def build_daemon_context() -> DaemonContext:
     carbon_store = CarbonStore(
         cluster=cluster,
         datasets_directory=datasets_path,
+        carbon_metric=carbon_metric,
     )
 
     clock = MagellanClock(policy.clock)

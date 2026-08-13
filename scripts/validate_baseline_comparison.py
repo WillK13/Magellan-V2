@@ -33,6 +33,12 @@ def main() -> int:
         except Exception as exc:
             errors.append(f"Invalid manifest.json: {exc}")
 
+    carbon_accounting = manifest.get("carbon_accounting", {})
+    if carbon_accounting.get("metric") not in {"direct", "lifecycle"}:
+        errors.append("Manifest is missing a valid carbon_accounting.metric")
+    if not carbon_accounting.get("column"):
+        errors.append("Manifest is missing carbon_accounting.column")
+
     outcomes: list[PolicyOutcome] = []
     if (root / "results.json").is_file():
         try:

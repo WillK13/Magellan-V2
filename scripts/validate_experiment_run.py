@@ -62,6 +62,12 @@ def main() -> int:
     ownership = csv_rows(root / "ownership.csv")
     results = csv_rows(root / "task_results.csv")
 
+    carbon_accounting = manifest.get("carbon_accounting", {})
+    if carbon_accounting.get("metric") not in {"direct", "lifecycle"}:
+        errors.append("Manifest is missing a valid carbon_accounting.metric")
+    if not carbon_accounting.get("column"):
+        errors.append("Manifest is missing carbon_accounting.column")
+
     node_ids = manifest.get("cluster", {}).get("node_ids", [])
     if len(node_ids) != 7 or len(set(node_ids)) != 7:
         errors.append(f"Expected seven unique node IDs; found {node_ids}")
@@ -125,6 +131,7 @@ def main() -> int:
     print(f"experiment_id: {manifest.get('experiment_id')}")
     print(f"run_id: {run_id}")
     print(f"nodes: {len(node_ids)}")
+    print(f"carbon_metric: {carbon_accounting.get('metric')}")
     print(f"decisions: {len(decisions)}")
     print(f"candidates: {len(candidates)}")
     print(f"migrations: {len(successful_migrations)}")
