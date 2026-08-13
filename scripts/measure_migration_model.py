@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import shlex
 import subprocess
@@ -199,6 +198,13 @@ def wait_running_with_checkpoint(
 def wait_completed(api: str, run_id: str, timeout: float, poll_seconds: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        # Production scheduling epochs can be long (900 s). Completion
+        # finalization is normally reconciled at an epoch boundary, but a
+        # microbenchmark should not wait up to one full scheduling interval
+        # after the migrated process has already exited. The operator
+        # reconcile endpoint performs the same LocalProcessRuntime.reconcile()
+        # step without invoking another scheduling decision.
+        request_json(f"{api}/runtime/reconcile", method="POST")
         state = task_state(api, run_id)
         if state is not None and state.get("status") == "completed":
             return state

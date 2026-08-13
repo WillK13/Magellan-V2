@@ -117,6 +117,29 @@ app = FastAPI(
 )
 
 
+@app.post("/runtime/reconcile")
+async def reconcile_runtime() -> dict:
+    """Run one operator-triggered local runtime reconciliation pass.
+
+    This does not run the scheduler or select an action. It is useful for
+    measurement/operations workflows that need to finalize a process that has
+    already exited without waiting for the next scheduling epoch.
+    """
+    events = await asyncio.to_thread(context.runtime.reconcile)
+    return {
+        "node_id": context.local_node.id,
+        "events": [
+            {
+                "task_id": event.task_id,
+                "status": event.status.value,
+                "exit_code": event.exit_code,
+                "error": event.error,
+            }
+            for event in events
+        ],
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     records = await context.bid_store.list_records()
