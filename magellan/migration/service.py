@@ -34,6 +34,7 @@ from magellan.policy.store import AdaptivePolicyStore
 from magellan.state.persistent_registry import PersistentTaskRegistry
 from magellan.state.task_models import TaskStatus
 from magellan.telemetry.store import TelemetryStore
+from magellan.experiments.events import ExperimentEventJournal
 
 
 class MigrationService:
@@ -56,6 +57,7 @@ class MigrationService:
         reconciliation_policy: ReconciliationPolicy | None = None,
         telemetry_store: TelemetryStore | None = None,
         adaptive_policy_store: AdaptivePolicyStore | None = None,
+        experiment_journal: ExperimentEventJournal | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -76,6 +78,7 @@ class MigrationService:
         )
         self._telemetry_store = telemetry_store
         self._adaptive_policy_store = adaptive_policy_store
+        self._experiment_journal = experiment_journal
         self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, task_id: str) -> asyncio.Lock:
@@ -484,6 +487,7 @@ class MigrationService:
                     )
 
                 activated = True
+                total_downtime_seconds = time.monotonic() - downtime_started
                 if self._telemetry_store is not None:
                     self._telemetry_store.record_migration_calibration(
                         source_node_id=self._local_node.id,
@@ -492,13 +496,36 @@ class MigrationService:
                         transfer_seconds=transfer_seconds,
                         restore_seconds=restore_seconds,
                         activation_seconds=activation_seconds,
-                        total_downtime_seconds=(
-                            time.monotonic() - downtime_started
-                        ),
+                        total_downtime_seconds=total_downtime_seconds,
                         transfer_bytes=(
                             missing_artifact_bytes
                             + checkpoint_summary.size_bytes
                         ),
+                    )
+                if self._experiment_journal is not None:
+                    self._experiment_journal.append(
+                        "migration_completed",
+                        task_id=task_id,
+                        generation=new_generation,
+                        trace_time_utc=migration_at_utc,
+                        payload={
+                            "migration_id": migration_id,
+                            "bid_id": bid_id,
+                            "source_node_id": self._local_node.id,
+                            "destination_node_id": destination_node_id,
+                            "checkpoint_bytes": checkpoint_summary.size_bytes,
+                            "missing_artifact_bytes": missing_artifact_bytes,
+                            "checkpoint_transfer_bytes": observed_transfer_bytes,
+                            "total_accounted_transfer_bytes": (
+                                missing_artifact_bytes
+                                + checkpoint_summary.size_bytes
+                            ),
+                            "checkpoint_seconds": checkpoint_seconds,
+                            "transfer_seconds": transfer_seconds,
+                            "restore_seconds": restore_seconds,
+                            "activation_seconds": activation_seconds,
+                            "total_downtime_seconds": total_downtime_seconds,
+                        },
                     )
                 await self._finalize_source_success(
                     task_id=task_id,
@@ -577,6 +604,24 @@ class MigrationService:
                     f"error={error}",
                     flush=True,
                 )
+                if self._experiment_journal is not None:
+                    self._experiment_journal.append(
+                        "migration_failed",
+                        task_id=task_id,
+                        generation=new_generation,
+                        trace_time_utc=migration_at_utc,
+                        payload={
+                            "migration_id": migration_id,
+                            "bid_id": bid_id,
+                            "source_node_id": self._local_node.id,
+                            "destination_node_id": destination_node_id,
+                            "checkpoint_seconds": checkpoint_seconds,
+                            "transfer_seconds": transfer_seconds,
+                            "restore_seconds": restore_seconds,
+                            "activation_seconds": activation_seconds,
+                            "error": error,
+                        },
+                    )
 
                 self._registry.restore_local_after_failure(
                     task_id=task_id,

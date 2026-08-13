@@ -63,6 +63,7 @@ from magellan.telemetry.service import TelemetryService
 from magellan.telemetry.store import TelemetryStore
 from magellan.policy.adaptive import AdaptivePolicyService
 from magellan.policy.store import AdaptivePolicyStore
+from magellan.experiments.events import ExperimentEventJournal
 
 
 @dataclass
@@ -101,6 +102,7 @@ class DaemonContext:
     adaptive_policy_store: AdaptivePolicyStore
     adaptive_policy_service: AdaptivePolicyService
     observed_capabilities: NodeRuntimeCapabilities
+    experiment_journal: ExperimentEventJournal
 
 
 def _task_files() -> list[Path]:
@@ -315,6 +317,7 @@ def build_daemon_context() -> DaemonContext:
     )
 
     migration_journal = MigrationJournal(state_root)
+    experiment_journal = ExperimentEventJournal(state_root, local_node.id)
 
     migration_service = MigrationService(
         local_node=local_node,
@@ -332,6 +335,7 @@ def build_daemon_context() -> DaemonContext:
         reconciliation_policy=policy.reconciliation,
         telemetry_store=telemetry_store,
         adaptive_policy_store=adaptive_policy_store,
+        experiment_journal=experiment_journal,
         client=MigrationClient(
             cluster=cluster,
             activation_timeout_seconds=(
@@ -367,6 +371,7 @@ def build_daemon_context() -> DaemonContext:
         accounting_service=accounting_service,
         telemetry_service=telemetry_service,
         adaptive_policy_service=adaptive_policy_service,
+        experiment_journal=experiment_journal,
     )
 
     submission_service = TaskSubmissionService(
@@ -425,4 +430,5 @@ def build_daemon_context() -> DaemonContext:
         adaptive_policy_store=adaptive_policy_store,
         adaptive_policy_service=adaptive_policy_service,
         observed_capabilities=observed_capabilities,
+        experiment_journal=experiment_journal,
     )

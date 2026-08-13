@@ -22,3 +22,5 @@ datasets/*.csv
 # Python bytecode
 __pycache__/
 *.py[cod]
+experiments/runs/*
+!experiments/runs/.gitkeep

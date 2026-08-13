@@ -36,6 +36,7 @@ from magellan.state.persistent_registry import (
 )
 from magellan.state.task_models import TaskStatus
 from magellan.telemetry.service import TelemetryService
+from magellan.experiments.events import ExperimentEventJournal
 
 from magellan.runtime.checkpoint import (
     CheckpointManager,
@@ -67,6 +68,7 @@ class SchedulerService:
         accounting_service: RuntimeAccountingService,
         telemetry_service: TelemetryService | None = None,
         adaptive_policy_service: AdaptivePolicyService | None = None,
+        experiment_journal: ExperimentEventJournal | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -85,6 +87,7 @@ class SchedulerService:
         self._accounting_service = accounting_service
         self._telemetry_service = telemetry_service
         self._adaptive_policy_service = adaptive_policy_service
+        self._experiment_journal = experiment_journal
         self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
         self._task_operation_locks: dict[str, asyncio.Lock] = {}
 
@@ -376,6 +379,36 @@ class SchedulerService:
             f"reason={decision.reason}",
             flush=True,
         )
+
+        if self._experiment_journal is not None:
+            state_snapshot = self._registry.get_state(task_id)
+            trace_datetime = (
+                trace_time.to_pydatetime()
+                if hasattr(trace_time, "to_pydatetime")
+                else trace_time
+            )
+            self._experiment_journal.append(
+                "scheduler_decision",
+                task_id=task_id,
+                generation=state_snapshot.generation,
+                trace_time_utc=trace_datetime,
+                payload={
+                    "task_profile": task.model_dump(mode="json"),
+                    "state": state_snapshot.model_dump(mode="json"),
+                    "checkpoint": (
+                        {
+                            "size_bytes": checkpoint_summary.size_bytes,
+                            "file_count": checkpoint_summary.file_count,
+                        }
+                        if checkpoint_summary is not None
+                        else None
+                    ),
+                    "static_data_bytes_by_destination": (
+                        static_data_bytes_by_destination
+                    ),
+                    "decision": decision.model_dump(mode="json"),
+                },
+            )
 
         if selected.action == ActionType.CONTINUE:
             return

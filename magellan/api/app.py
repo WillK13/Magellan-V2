@@ -134,6 +134,7 @@ async def health() -> dict:
         "internal_ip": str(context.local_node.internal_ip),
         "carbon_region": context.local_node.carbon_region,
         "capacity": context.local_node.capacity,
+        "epoch_seconds": context.cluster.epoch_seconds,
         "auction_strategy": auction_status["strategy"],
         "available_task_slots": auction_status[
             "available_task_slots"
@@ -599,6 +600,39 @@ async def reset_policy_task_state(task_id: str) -> dict:
     return {
         "task_id": task_id,
         "deleted": context.adaptive_policy_service.reset(task_id),
+    }
+
+
+@app.get("/experiment/events/status")
+async def experiment_event_status() -> dict:
+    return {
+        "node_id": context.local_node.id,
+        "last_sequence": context.experiment_journal.last_sequence,
+        "path": str(context.experiment_journal.path),
+    }
+
+
+@app.get("/experiment/events")
+async def experiment_events(
+    after_sequence: int = 0,
+    task_id: str | None = None,
+    event_type: str | None = None,
+    limit: int = 10_000,
+) -> dict:
+    if after_sequence < 0:
+        raise HTTPException(status_code=400, detail="after_sequence must be non-negative")
+    if limit < 1 or limit > 100_000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100000")
+    events = context.experiment_journal.list_events(
+        after_sequence=after_sequence,
+        task_id=task_id,
+        event_type=event_type,
+        limit=limit,
+    )
+    return {
+        "node_id": context.local_node.id,
+        "last_sequence": context.experiment_journal.last_sequence,
+        "events": [event.model_dump(mode="json") for event in events],
     }
 
 
