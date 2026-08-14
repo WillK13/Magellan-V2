@@ -10,7 +10,9 @@ from magellan.experiments.bundle import validate_checksums
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate a seven-node network measurement bundle")
+    parser = argparse.ArgumentParser(
+        description="Validate a topology-driven directed-network measurement bundle"
+    )
     parser.add_argument("bundle")
     return parser.parse_args()
 
@@ -43,8 +45,13 @@ def main() -> int:
     bandwidth = read_csv(bandwidth_path) if bandwidth_path.is_file() else []
     node_ids = list(metadata.get("cluster", {}).get("node_ids", []))
     expected_edges = len(node_ids) * max(0, len(node_ids) - 1)
-    if len(node_ids) != 7:
-        errors.append(f"Expected 7 nodes, found {len(node_ids)}")
+    if len(node_ids) < 2:
+        errors.append(f"Expected at least 2 nodes, found {len(node_ids)}")
+    metadata_edge_count = metadata.get("cluster", {}).get("directed_edge_count")
+    if metadata_edge_count is not None and int(metadata_edge_count) != expected_edges:
+        errors.append(
+            f"Metadata directed_edge_count={metadata_edge_count}; expected {expected_edges}"
+        )
     if len(edges) != expected_edges:
         errors.append(f"Expected {expected_edges} edge summaries, found {len(edges)}")
 

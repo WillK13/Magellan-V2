@@ -131,3 +131,55 @@ def test_enrich_profile_uses_fresh_power_and_checkpoint(tmp_path) -> None:
     enriched = service.enrich_profile(reg.scoring_profile("task-1"))
     assert enriched.power_kw == pytest.approx(0.07)
     assert enriched.checkpoint_bytes == 987
+
+
+def peer_node(node_id: str, ip: str) -> NodeConfig:
+    return NodeConfig(
+        id=node_id,
+        name=node_id.title(),
+        vm_name=node_id,
+        zone="test-zone",
+        internal_ip=ip,
+        carbon_region=node_id,
+        dataset_file="unused.csv",
+        latitude=40,
+        longitude=-70,
+        resources={"cpu_cores": 2, "memory_mb": 4096},
+    )
+
+
+@pytest.mark.asyncio
+async def test_edge_refresh_is_topology_driven_and_lazy(tmp_path, monkeypatch) -> None:
+    boston = node()
+    virginia = peer_node("virginia", "10.0.0.2")
+    california = peer_node("california", "10.0.0.3")
+    cluster = ClusterConfig(nodes=[boston, virginia, california])
+    store = TelemetryStore(tmp_path)
+    service = TelemetryService(
+        local_node=boston,
+        cluster=cluster,
+        policy=TelemetryPolicy(edge_stale_after_seconds=120),
+        registry=registry(tmp_path),
+        store=store,
+        process_sampler=SequenceSampler([]),
+    )
+
+    store.record_latency("boston", "virginia", 20)
+    store.record_transfer("boston", "virginia", 1_000_000, 0.2)
+
+    called: list[tuple[str, bool]] = []
+
+    async def fake_probe(destination_node_id: str, *, force_bandwidth: bool = False):
+        called.append((destination_node_id, force_bandwidth))
+        store.record_latency("boston", destination_node_id, 25)
+        store.record_transfer("boston", destination_node_id, 1_000_000, 0.25)
+        return service.edge_view(destination_node_id)
+
+    monkeypatch.setattr(service, "probe_edge", fake_probe)
+
+    views = await service.ensure_edges_fresh(["virginia", "california"])
+
+    assert service.peer_ids() == ("virginia", "california")
+    assert called == [("california", True)]
+    assert views["virginia"].bandwidth_source == "measured_transfer_ema"
+    assert views["california"].bandwidth_source == "measured_transfer_ema"

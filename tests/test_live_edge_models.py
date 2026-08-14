@@ -112,6 +112,8 @@ def test_graph_prefers_fresh_measured_edge_and_calibration(tmp_path) -> None:
     assert estimate.details["migration_overhead_seconds"] == pytest.approx(1)
     assert estimate.details["predicted_downtime_seconds"] > 1
     assert estimate.details["bandwidth_source"] == "measured_transfer_ema"
+    assert estimate.details["transfer_model"] == "end_to_end_measured_bandwidth"
+    assert estimate.details["transfer_seconds"] == pytest.approx(0.2)
 
 
 def test_graph_falls_back_when_edge_measurements_are_stale(tmp_path) -> None:

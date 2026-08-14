@@ -43,6 +43,8 @@ class TelemetryService:
         self._node_power_reader = node_power_reader or RaplPowerReader()
         self._previous_cpu: dict[str, tuple[float, datetime]] = {}
         self._last_edge_probe_monotonic = 0.0
+        self._last_bandwidth_probe_monotonic: dict[str, float] = {}
+        self._bandwidth_probe_payload = bytes(self._policy.edge_bandwidth_probe_bytes)
 
     @property
     def store(self) -> TelemetryStore:
@@ -150,23 +152,88 @@ class TelemetryService:
 
         return self._store.update_task(record)
 
-    async def probe_edge(self, destination_node_id: str) -> None:
+    def _configured_edge_values(
+        self, destination_node_id: str
+    ) -> tuple[float, float]:
+        configured = self._cluster.get_edge_override(
+            self._local_node.id, destination_node_id
+        )
+        return (
+            configured.bandwidth_mbps
+            if configured is not None
+            else self._cluster.default_bandwidth_mbps,
+            configured.latency_ms
+            if configured is not None
+            else self._cluster.default_latency_ms,
+        )
+
+    def edge_view(self, destination_node_id: str):
+        self._cluster.get_node(destination_node_id)
+        bandwidth, latency = self._configured_edge_values(destination_node_id)
+        return self._store.edge_view(
+            self._local_node.id,
+            destination_node_id,
+            bandwidth,
+            latency,
+            self._policy.edge_stale_after_seconds,
+        )
+
+    def peer_ids(self) -> tuple[str, ...]:
+        return tuple(
+            node.id
+            for node in self._cluster.nodes
+            if node.id != self._local_node.id
+        )
+
+    def _bandwidth_probe_due(
+        self, destination_node_id: str, *, force: bool
+    ) -> bool:
+        if force:
+            return True
+        view = self.edge_view(destination_node_id)
+        if view.bandwidth_freshness.value != "fresh":
+            return True
+        last = self._last_bandwidth_probe_monotonic.get(destination_node_id)
+        if last is None:
+            # Persisted telemetry may still be fresh after a daemon restart.
+            # Do not discard it, but refresh it on the next normal bandwidth
+            # interval instead of forcing a burst immediately.
+            age = view.bandwidth_age_seconds or 0.0
+            return age >= self._policy.edge_bandwidth_probe_interval_seconds
+        return (
+            time.monotonic() - last
+            >= self._policy.edge_bandwidth_probe_interval_seconds
+        )
+
+    async def probe_edge(
+        self,
+        destination_node_id: str,
+        *,
+        force_bandwidth: bool = False,
+    ):
+        """Refresh one directed edge using live peer measurements.
+
+        The peer set comes from the current cluster membership.  Bandwidth is
+        measured as an end-to-end upload sample; consumers must therefore not
+        add RTT again when using ``measured_transfer_ema``.
+        """
+        if destination_node_id == self._local_node.id:
+            raise ValueError("Destination must be a peer")
         destination = self._cluster.get_node(destination_node_id)
-        url = (
+        timeout = httpx.Timeout(self._cluster.request_timeout_seconds)
+        health_url = (
             f"http://{destination.internal_ip}:"
             f"{self._cluster.api_port}/health"
         )
-        started = time.perf_counter()
+
+        latency_started = time.perf_counter()
         try:
-            timeout = httpx.Timeout(self._cluster.request_timeout_seconds)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.get(url)
+                response = await client.get(health_url)
                 response.raise_for_status()
-            latency_ms = (time.perf_counter() - started) * 1000.0
+            latency_ms = (time.perf_counter() - latency_started) * 1000.0
             self._store.record_latency(
-                self._local_node.id,
-                destination_node_id,
-                latency_ms,
+                self._local_node.id, destination_node_id, latency_ms
             )
         except Exception as exc:
             self._store.record_edge_failure(
@@ -174,6 +241,89 @@ class TelemetryService:
                 destination_node_id,
                 f"{type(exc).__name__}: {exc}",
             )
+            return self.edge_view(destination_node_id)
+
+        if self._bandwidth_probe_due(
+            destination_node_id, force=force_bandwidth
+        ):
+            upload_url = (
+                f"http://{destination.internal_ip}:"
+                f"{self._cluster.api_port}/telemetry/probe/upload"
+            )
+            transfer_started = time.perf_counter()
+            try:
+                # Use a fresh connection so the sample includes connection and
+                # request/response effects, matching the end-to-end semantics
+                # of observed migration-transfer throughput.
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(
+                        upload_url,
+                        content=self._bandwidth_probe_payload,
+                        headers={"Content-Type": "application/octet-stream"},
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                transfer_seconds = max(
+                    1e-9, time.perf_counter() - transfer_started
+                )
+                received_bytes = int(payload.get("received_bytes", -1))
+                if received_bytes != len(self._bandwidth_probe_payload):
+                    raise RuntimeError(
+                        "Peer bandwidth probe acknowledged "
+                        f"{received_bytes} bytes; expected "
+                        f"{len(self._bandwidth_probe_payload)}"
+                    )
+                self._store.record_transfer(
+                    self._local_node.id,
+                    destination_node_id,
+                    len(self._bandwidth_probe_payload),
+                    transfer_seconds,
+                )
+                self._last_bandwidth_probe_monotonic[
+                    destination_node_id
+                ] = time.monotonic()
+            except Exception as exc:
+                self._store.record_edge_failure(
+                    self._local_node.id,
+                    destination_node_id,
+                    f"bandwidth_probe:{type(exc).__name__}: {exc}",
+                )
+
+        return self.edge_view(destination_node_id)
+
+    async def ensure_edges_fresh(
+        self, destination_node_ids: set[str] | list[str] | tuple[str, ...]
+    ) -> dict[str, object]:
+        """Refresh stale/unseen candidate edges before a scheduling decision."""
+        unique = tuple(dict.fromkeys(destination_node_ids))
+        stale: list[str] = []
+        for destination_node_id in unique:
+            view = self.edge_view(destination_node_id)
+            if (
+                view.latency_freshness.value != "fresh"
+                or view.bandwidth_freshness.value != "fresh"
+            ):
+                stale.append(destination_node_id)
+
+        for destination_node_id in stale:
+            # Avoid self-contention from simultaneous bandwidth probes leaving
+            # the same source NIC. Cold/stale refreshes are intentionally
+            # serialized per source node.
+            await self.probe_edge(
+                destination_node_id, force_bandwidth=True
+            )
+
+        return {
+            destination_node_id: self.edge_view(destination_node_id)
+            for destination_node_id in unique
+        }
+
+    async def refresh_all_edges(self) -> dict[str, object]:
+        """Force a live refresh for every peer in current cluster membership."""
+        peer_ids = self.peer_ids()
+        for peer_id in peer_ids:
+            await self.probe_edge(peer_id, force_bandwidth=True)
+        return {peer_id: self.edge_view(peer_id) for peer_id in peer_ids}
 
     def _apply_rapl_power(self, task_ids: list[str]) -> None:
         node_power_kw = self._node_power_reader.sample_power_kw()
@@ -219,13 +369,10 @@ class TelemetryService:
         )
         edge_count = 0
         if probe_due:
-            await asyncio.gather(
-                *(
-                    self.probe_edge(node.id)
-                    for node in self._cluster.nodes
-                    if node.id != self._local_node.id
-                )
-            )
+            for node in self._cluster.nodes:
+                if node.id == self._local_node.id:
+                    continue
+                await self.probe_edge(node.id)
             edge_count = max(0, len(self._cluster.nodes) - 1)
             self._last_edge_probe_monotonic = now_monotonic
 

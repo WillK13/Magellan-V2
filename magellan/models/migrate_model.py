@@ -55,11 +55,23 @@ def estimate_migrate(
 
     total_transfer_bytes = task.checkpoint_bytes + static_data_bytes
 
-    transfer_duration_seconds = transfer_seconds(
-        size_bytes=total_transfer_bytes,
-        bandwidth_mbps=edge.bandwidth_mbps,
-        latency_ms=edge.latency_ms,
-    )
+    if edge.bandwidth_source == "measured_transfer_ema":
+        # Measured transfer throughput is end-to-end: the observed duration
+        # already contains connection/protocol/RTT effects. Adding latency a
+        # second time would systematically over-predict transfer time.
+        transfer_duration_seconds = (
+            total_transfer_bytes
+            * 8.0
+            / (edge.bandwidth_mbps * 1_000_000.0)
+        )
+        transfer_model = "end_to_end_measured_bandwidth"
+    else:
+        transfer_duration_seconds = transfer_seconds(
+            size_bytes=total_transfer_bytes,
+            bandwidth_mbps=edge.bandwidth_mbps,
+            latency_ms=edge.latency_ms,
+        )
+        transfer_model = "configured_bandwidth_plus_latency"
 
     checkpoint_seconds = (
         edge.checkpoint_seconds
@@ -192,6 +204,7 @@ def estimate_migrate(
             "static_data_bytes": static_data_bytes,
             "total_transfer_bytes": total_transfer_bytes,
             "transfer_seconds": transfer_duration_seconds,
+            "transfer_model": transfer_model,
             "transfer_size_gb": transfer_size_gb,
             "source_checkpoint_carbon_intensity_g_per_kwh": (
                 source_checkpoint_forecast.average_g_per_kwh

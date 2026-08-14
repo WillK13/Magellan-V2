@@ -104,6 +104,9 @@ class TelemetryPolicy(BaseModel):
     enabled: bool = True
     task_scan_interval_seconds: float = Field(default=1.0, gt=0)
     edge_probe_interval_seconds: float = Field(default=15.0, gt=0)
+    edge_bandwidth_probe_interval_seconds: float = Field(default=60.0, gt=0)
+    edge_bandwidth_probe_bytes: int = Field(default=1_048_576, ge=65_536)
+    refresh_edges_before_decision: bool = True
     task_stale_after_seconds: float = Field(default=10.0, gt=0)
     edge_stale_after_seconds: float = Field(default=120.0, gt=0)
     calibration_stale_after_seconds: float = Field(default=3600.0, gt=0)

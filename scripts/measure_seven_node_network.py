@@ -25,8 +25,8 @@ from magellan.experiments.measurement import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Measure the real seven-node directed WAN mesh. Run from a cluster node "
-            "that can SSH to every peer over private addresses."
+            "Measure the real directed WAN mesh described by the cluster config. "
+            "Run from a cluster node that can SSH to every peer over private addresses."
         )
     )
     parser.add_argument("--cluster", default="config/cluster.gcp.json")
@@ -135,7 +135,7 @@ def main() -> int:
         raise FileExistsError(f"Measurement bundle already exists: {bundle}")
     (bundle / "raw").mkdir(parents=True)
 
-    print("== Seven-node WAN characterization ==")
+    print("== Topology-driven WAN characterization ==")
     print(f"measurement_id={measurement_id}")
     print(f"directed_edges={len(pairs)}")
     print(
@@ -238,7 +238,7 @@ print(json.dumps(values))
 """
 
     try:
-        print("== Measure all 42 directed edges ==")
+        print(f"== Measure all {len(pairs)} directed edges ==")
         for index, (source_id, destination_id) in enumerate(pairs, start=1):
             source = node_by_id[source_id]
             destination = node_by_id[destination_id]
@@ -307,6 +307,10 @@ print(json.dumps(values))
                 size_bytes=args.payload_bytes,
                 bandwidth_mbps=effective_bandwidth,
                 latency_ms=effective_latency,
+                bandwidth_is_end_to_end=(
+                    telemetry.get("bandwidth_source")
+                    == "measured_transfer_ema"
+                ),
             )
             measured_bandwidths: list[float] = []
             for sample_index, duration in enumerate(transfer_values, start=1):
@@ -359,6 +363,10 @@ print(json.dumps(values))
                         post_telemetry["effective_bandwidth_mbps"]
                     ),
                     latency_ms=float(post_telemetry["effective_latency_ms"]),
+                    bandwidth_is_end_to_end=(
+                        post_telemetry.get("bandwidth_source")
+                        == "measured_transfer_ema"
+                    ),
                 )
             edge_rows.append(
                 {
@@ -412,7 +420,7 @@ print(json.dumps(values))
                 }
             )
             line = (
-                f"[{index:02d}/42] {source_id:16} -> {destination_id:16} "
+                f"[{index:02d}/{len(pairs):02d}] {source_id:16} -> {destination_id:16} "
                 f"rtt={rtt_summary.median:.1f}ms "
                 f"bw={bandwidth_summary.median:.1f}Mbps "
                 f"pred_err="
@@ -441,7 +449,7 @@ print(json.dumps(values))
 
     metadata = {
         "format_version": 1,
-        "measurement_type": "seven_node_network",
+        "measurement_type": "directed_network",
         "measurement_id": measurement_id,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "git": {
@@ -453,6 +461,8 @@ print(json.dumps(values))
             "path": args.cluster,
             "sha256": sha256_file(args.cluster),
             "node_ids": node_ids,
+            "node_count": len(node_ids),
+            "directed_edge_count": len(pairs),
             "local_node_id": local.id,
             "api_port": cluster.api_port,
         },
@@ -508,7 +518,7 @@ print(json.dumps(values))
         if row["post_seed_transfer_absolute_error_percent"] is not None
     ]
     post_seed_error_summary = summarize_samples(post_seed_errors)
-    print("\nSEVEN-NODE NETWORK MEASUREMENT PASSED")
+    print("\nDIRECTED NETWORK MEASUREMENT PASSED")
     print(f"bundle: {bundle}")
     print(f"directed_edges: {len(edge_rows)}")
     print(f"median_abs_transfer_prediction_error_pct: {error_summary.median:.2f}")

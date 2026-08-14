@@ -279,6 +279,14 @@ class SchedulerService:
             )
 
             compatible_destination_ids = self._compatible_destinations(task)
+            if (
+                self._telemetry_service is not None
+                and self._policy.telemetry.refresh_edges_before_decision
+                and compatible_destination_ids
+            ):
+                await self._telemetry_service.ensure_edges_fresh(
+                    compatible_destination_ids
+                )
             for destination in self._graph.peers(
                 self._local_node.id
             ):
@@ -621,6 +629,14 @@ class SchedulerService:
             raise RuntimeError(
                 "Incompatible migration destination: "
                 + "; ".join(compatibility.reasons)
+            )
+
+        if (
+            self._telemetry_service is not None
+            and self._policy.telemetry.refresh_edges_before_decision
+        ):
+            await self._telemetry_service.ensure_edges_fresh(
+                {destination_node_id}
             )
 
         checkpoint_summary = await asyncio.to_thread(

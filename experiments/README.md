@@ -40,3 +40,15 @@ measurement mode to preserve cold edge predictions, inject measured RTT/transfer
 samples into each source daemon, and record post-seed prediction error in the same
 bundle. Controlled migration bundles also include transfer setup/wall timing and
 the calibrated migration-overhead term.
+
+### Stage 3A.2 live topology calibration
+
+Edge telemetry is not a fixed seven-node lookup table. Every daemon derives its
+outgoing peer set from current cluster membership, actively measures RTT and a bounded
+end-to-end upload sample, timestamps those observations, and refreshes unseen/stale
+edges before migration candidates are scored. Measured transfer bandwidth is treated
+as end-to-end throughput, so RTT is not added a second time in migration-time
+prediction. The experiment helper `scripts/refresh_cluster_edge_telemetry.py` simply
+forces the same live mechanism on every configured node before a controlled campaign;
+it does not inject hard-coded edge values. For N configured nodes, the measurement
+mesh naturally contains N*(N-1) directed edges.

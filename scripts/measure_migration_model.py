@@ -46,6 +46,14 @@ def parse_args() -> argparse.Namespace:
         help="Controlled payload size in bytes. Repeat for multiple sizes.",
     )
     parser.add_argument("--samples-per-case", type=int, default=1)
+    parser.add_argument(
+        "--skip-edge-preflight",
+        action="store_true",
+        help=(
+            "Do not force a live directed-edge telemetry refresh immediately "
+            "before each migration candidate is evaluated."
+        ),
+    )
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--measurements-root", default="experiments/measurements")
@@ -437,9 +445,16 @@ def main() -> int:
                     min(args.timeout_seconds, 300.0),
                     args.poll_seconds,
                 )
-                edge_telemetry = request_json(
-                    f"{source_api}/telemetry/edges/{destination_id}"
-                )
+                if args.skip_edge_preflight:
+                    edge_telemetry = request_json(
+                        f"{source_api}/telemetry/edges/{destination_id}"
+                    )
+                else:
+                    edge_telemetry = request_json(
+                        f"{source_api}/telemetry/edges/{destination_id}/ensure",
+                        method="POST",
+                        timeout=min(60.0, args.timeout_seconds),
+                    )
                 calibration_before = request_json(f"{source_api}/telemetry/calibration")
                 edge_calibration = next(
                     (
@@ -579,6 +594,8 @@ def main() -> int:
                     "candidate_calibration_source": predicted.get("calibration_source"),
                     "candidate_bandwidth_source": predicted.get("bandwidth_source"),
                     "candidate_latency_source": predicted.get("latency_source"),
+                    "candidate_transfer_model": predicted.get("transfer_model"),
+                    "edge_preflight_enabled": not args.skip_edge_preflight,
                     "predicted_checkpoint_seconds": predicted_checkpoint,
                     "actual_checkpoint_seconds": actual_checkpoint,
                     "checkpoint_error_percent": signed_percent_error(
@@ -715,6 +732,7 @@ def main() -> int:
             "state_root": args.state_root,
             "expected_carbon_metric": args.expected_carbon_metric,
             "expected_state_token": args.expected_state_token,
+            "edge_preflight_enabled": not args.skip_edge_preflight,
             "checkpoint_semantics": (
                 "Payload is pre-existing application checkpoint state. Actual checkpoint_seconds "
                 "measures quiesce/stop plus checkpoint validation, not "

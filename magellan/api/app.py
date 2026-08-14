@@ -4,7 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from magellan.api.peer_client import check_all_peers
@@ -493,6 +493,78 @@ async def telemetry_summary() -> dict:
             for record in context.telemetry_store.list_calibrations()
         ],
     }
+
+
+@app.post("/telemetry/probe/upload")
+async def telemetry_probe_upload(request: Request) -> dict:
+    """Accept a bounded in-memory payload for live directed-edge calibration."""
+    body = await request.body()
+    maximum = max(
+        context.policy.telemetry.edge_bandwidth_probe_bytes * 4,
+        4 * 1024 * 1024,
+    )
+    if len(body) > maximum:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Telemetry probe payload exceeds {maximum} bytes",
+        )
+    return {
+        "node_id": context.local_node.id,
+        "received_bytes": len(body),
+    }
+
+
+@app.post("/telemetry/refresh")
+async def refresh_edge_telemetry() -> dict:
+    """Force live calibration of all current outgoing peer edges."""
+    views = await context.telemetry_service.refresh_all_edges()
+    return {
+        "node_id": context.local_node.id,
+        "peer_count": len(views),
+        "edges": {
+            destination_node_id: view.model_dump(mode="json")
+            for destination_node_id, view in views.items()
+        },
+    }
+
+
+@app.post(
+    "/telemetry/edges/{destination_node_id}/ensure",
+    response_model=EdgeTelemetryView,
+)
+async def ensure_edge_telemetry_detail(
+    destination_node_id: str,
+) -> EdgeTelemetryView:
+    """Refresh one directed edge only when its live telemetry is stale/unseen."""
+    try:
+        context.cluster.get_node(destination_node_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if destination_node_id == context.local_node.id:
+        raise HTTPException(status_code=400, detail="Destination must be a peer")
+    views = await context.telemetry_service.ensure_edges_fresh(
+        [destination_node_id]
+    )
+    return views[destination_node_id]
+
+
+@app.post(
+    "/telemetry/edges/{destination_node_id}/refresh",
+    response_model=EdgeTelemetryView,
+)
+async def refresh_edge_telemetry_detail(
+    destination_node_id: str,
+) -> EdgeTelemetryView:
+    """Force a live calibration sample for one directed peer edge."""
+    try:
+        context.cluster.get_node(destination_node_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if destination_node_id == context.local_node.id:
+        raise HTTPException(status_code=400, detail="Destination must be a peer")
+    return await context.telemetry_service.probe_edge(
+        destination_node_id, force_bandwidth=True
+    )
 
 
 @app.get("/telemetry/tasks", response_model=list[TaskTelemetryView])

@@ -87,7 +87,12 @@ def predict_transfer_seconds(
     size_bytes: int,
     bandwidth_mbps: float,
     latency_ms: float,
+    bandwidth_is_end_to_end: bool = False,
 ) -> float:
+    if bandwidth_is_end_to_end:
+        if bandwidth_mbps <= 0:
+            raise ValueError("bandwidth_mbps must be positive")
+        return size_bytes * 8.0 / (bandwidth_mbps * 1_000_000.0)
     return transfer_seconds(
         size_bytes=size_bytes,
         bandwidth_mbps=bandwidth_mbps,

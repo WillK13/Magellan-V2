@@ -33,6 +33,12 @@ def test_percent_error_and_transfer_prediction() -> None:
         bandwidth_mbps=100.0,
         latency_ms=20.0,
     ) == pytest.approx(10.02)
+    assert predict_transfer_seconds(
+        size_bytes=125_000_000,
+        bandwidth_mbps=100.0,
+        latency_ms=20.0,
+        bandwidth_is_end_to_end=True,
+    ) == pytest.approx(10.0)
 
 
 def test_directed_edge_pairs_cover_complete_mesh() -> None:
@@ -46,3 +52,15 @@ def test_directed_edge_pairs_cover_complete_mesh() -> None:
 def test_percentile_rejects_empty_input() -> None:
     with pytest.raises(ValueError):
         percentile([], 95)
+
+
+def test_directed_edge_pairs_scale_with_membership() -> None:
+    seven = [f"n{i}" for i in range(7)]
+    eight = [f"n{i}" for i in range(8)]
+
+    assert len(directed_edge_pairs(seven)) == 42
+    assert len(directed_edge_pairs(eight)) == 56
+    assert all(
+        source != destination
+        for source, destination in directed_edge_pairs(eight)
+    )
