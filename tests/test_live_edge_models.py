@@ -78,7 +78,7 @@ def test_graph_prefers_fresh_measured_edge_and_calibration(tmp_path) -> None:
     assert edge.restore_seconds == pytest.approx(1)
     # 7 total - 3 checkpoint - 2 transfer - 1 restore.
     assert edge.migration_overhead_seconds == pytest.approx(1)
-    assert edge.bandwidth_source == "measured_transfer_ema"
+    assert edge.bandwidth_source == "measured_migration_transport_ema"
     assert edge.calibration_source == "measured_migration_ema"
 
     estimate = estimate_migrate(
@@ -111,7 +111,7 @@ def test_graph_prefers_fresh_measured_edge_and_calibration(tmp_path) -> None:
     assert estimate.details["restore_seconds"] == pytest.approx(1)
     assert estimate.details["migration_overhead_seconds"] == pytest.approx(1)
     assert estimate.details["predicted_downtime_seconds"] > 1
-    assert estimate.details["bandwidth_source"] == "measured_transfer_ema"
+    assert estimate.details["bandwidth_source"] == "measured_migration_transport_ema"
     assert estimate.details["transfer_model"] == "end_to_end_measured_bandwidth"
     assert estimate.details["transfer_seconds"] == pytest.approx(0.2)
 

@@ -52,3 +52,16 @@ prediction. The experiment helper `scripts/refresh_cluster_edge_telemetry.py` si
 forces the same live mechanism on every configured node before a controlled campaign;
 it does not inject hard-coded edge values. For N configured nodes, the measurement
 mesh naturally contains N*(N-1) directed edges.
+
+
+### Stage 3A.3 transport-faithful calibration
+
+Live migration-throughput calibration now uses the same rsync-over-SSH transfer
+component as checkpoint migration instead of an HTTP upload surrogate. Probes are
+incompressible, adaptive, and bounded: a small initial sample is retained on slow
+edges, while fast edges receive one larger follow-up sample targeting a few seconds
+of transfer time, capped by policy. RTT remains an independent HTTP liveness/latency
+measurement. Actual migrations and transport-faithful probes update the same
+migration-transport EMA; unseen or stale edges are refreshed lazily before they are
+used by scheduling decisions. No node IDs, edge counts, or measured bandwidth values
+are hard-coded into the scheduler.

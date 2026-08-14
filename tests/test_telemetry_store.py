@@ -57,7 +57,7 @@ def test_edge_telemetry_uses_ema_and_survives_restart(tmp_path) -> None:
     # 80 Mbps then 40 Mbps with alpha .5.
     assert view.effective_bandwidth_mbps == pytest.approx(60)
     assert view.latency_source == "measured_http_rtt"
-    assert view.bandwidth_source == "measured_transfer_ema"
+    assert view.bandwidth_source == "measured_migration_transport_ema"
 
 
 def test_migration_calibration_persists_and_has_freshness(tmp_path) -> None:

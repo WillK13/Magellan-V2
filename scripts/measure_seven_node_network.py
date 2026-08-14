@@ -308,8 +308,9 @@ print(json.dumps(values))
                 bandwidth_mbps=effective_bandwidth,
                 latency_ms=effective_latency,
                 bandwidth_is_end_to_end=(
-                    telemetry.get("bandwidth_source")
-                    == "measured_transfer_ema"
+                    str(telemetry.get("bandwidth_source", "")).startswith(
+                        "measured_"
+                    )
                 ),
             )
             measured_bandwidths: list[float] = []
@@ -364,8 +365,9 @@ print(json.dumps(values))
                     ),
                     latency_ms=float(post_telemetry["effective_latency_ms"]),
                     bandwidth_is_end_to_end=(
-                        post_telemetry.get("bandwidth_source")
-                        == "measured_transfer_ema"
+                        str(
+                            post_telemetry.get("bandwidth_source", "")
+                        ).startswith("measured_")
                     ),
                 )
             edge_rows.append(

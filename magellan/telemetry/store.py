@@ -171,6 +171,8 @@ class TelemetryStore:
         transfer_bytes: int,
         duration_seconds: float,
         sampled_at_utc: datetime | None = None,
+        *,
+        sample_source: str = "migration_transfer",
     ) -> EdgeTelemetryRecord:
         if transfer_bytes <= 0 or duration_seconds <= 0:
             raise ValueError("A bandwidth sample needs positive bytes and duration")
@@ -187,6 +189,7 @@ class TelemetryStore:
                 self._ema_alpha,
             )
             record.bandwidth_sample_count += 1
+            record.last_bandwidth_sample_source = sample_source
             record.last_bandwidth_sample_at_utc = _utc(sampled_at_utc)
             record.last_success_at_utc = record.last_bandwidth_sample_at_utc
             record.consecutive_failures = 0
@@ -264,7 +267,11 @@ class TelemetryStore:
                 else configured_bandwidth_mbps
             ),
             latency_source=("measured_http_rtt" if use_latency else "configured_fallback"),
-            bandwidth_source=("measured_transfer_ema" if use_bandwidth else "configured_fallback"),
+            bandwidth_source=(
+                "measured_migration_transport_ema"
+                if use_bandwidth
+                else "configured_fallback"
+            ),
             latency_freshness=latency_freshness,
             bandwidth_freshness=bandwidth_freshness,
             latency_age_seconds=_age_seconds(record.last_latency_sample_at_utc, now),

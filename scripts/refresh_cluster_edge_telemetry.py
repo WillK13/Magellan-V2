@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--cluster", default="config/cluster.gcp.json")
-    parser.add_argument("--timeout-seconds", type=float, default=60.0)
+    parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument(
         "--allow-fallback",
         action="store_true",
@@ -84,7 +84,7 @@ def main() -> int:
         for destination_id, view in edges.items():
             observed_edges += 1
             measured = (
-                view.get("bandwidth_source") == "measured_transfer_ema"
+                view.get("bandwidth_source") == "measured_migration_transport_ema"
                 and view.get("latency_source") == "measured_http_rtt"
                 and view.get("bandwidth_freshness") == "fresh"
                 and view.get("latency_freshness") == "fresh"

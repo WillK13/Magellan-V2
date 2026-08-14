@@ -55,7 +55,10 @@ def estimate_migrate(
 
     total_transfer_bytes = task.checkpoint_bytes + static_data_bytes
 
-    if edge.bandwidth_source == "measured_transfer_ema":
+    if edge.bandwidth_source in {
+        "measured_transfer_ema",
+        "measured_migration_transport_ema",
+    }:
         # Measured transfer throughput is end-to-end: the observed duration
         # already contains connection/protocol/RTT effects. Adding latency a
         # second time would systematically over-predict transfer time.

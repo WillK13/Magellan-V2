@@ -497,7 +497,11 @@ async def telemetry_summary() -> dict:
 
 @app.post("/telemetry/probe/upload")
 async def telemetry_probe_upload(request: Request) -> dict:
-    """Accept a bounded in-memory payload for live directed-edge calibration."""
+    """Accept a bounded HTTP diagnostic payload.
+
+    Migration bandwidth calibration uses rsync/SSH probes; this endpoint is
+    retained for diagnostics and compatibility only.
+    """
     body = await request.body()
     maximum = max(
         context.policy.telemetry.edge_bandwidth_probe_bytes * 4,

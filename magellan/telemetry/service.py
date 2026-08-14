@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shlex
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 import httpx
 
@@ -44,7 +48,12 @@ class TelemetryService:
         self._previous_cpu: dict[str, tuple[float, datetime]] = {}
         self._last_edge_probe_monotonic = 0.0
         self._last_bandwidth_probe_monotonic: dict[str, float] = {}
-        self._bandwidth_probe_payload = bytes(self._policy.edge_bandwidth_probe_bytes)
+        self._bandwidth_probe_lock = asyncio.Lock()
+        self._ssh_user = os.getenv(
+            "MAGELLAN_SSH_USER",
+            os.getenv("USER", "WILL"),
+        )
+        self._probe_payload_paths: dict[int, Path] = {}
 
     @property
     def store(self) -> TelemetryStore:
@@ -191,18 +200,143 @@ class TelemetryService:
         if force:
             return True
         view = self.edge_view(destination_node_id)
-        if view.bandwidth_freshness.value != "fresh":
+        if view.bandwidth_freshness.value == "unavailable":
             return True
         last = self._last_bandwidth_probe_monotonic.get(destination_node_id)
         if last is None:
-            # Persisted telemetry may still be fresh after a daemon restart.
-            # Do not discard it, but refresh it on the next normal bandwidth
-            # interval instead of forcing a burst immediately.
+            # Persisted telemetry survives daemon restarts. Refresh it on the
+            # configured maintenance interval; decision-time freshness checks
+            # still force an immediate probe when a stale edge matters.
             age = view.bandwidth_age_seconds or 0.0
             return age >= self._policy.edge_bandwidth_probe_interval_seconds
         return (
             time.monotonic() - last
             >= self._policy.edge_bandwidth_probe_interval_seconds
+        )
+
+    def _probe_payload_path(self, size_bytes: int) -> Path:
+        cached = self._probe_payload_paths.get(size_bytes)
+        if cached is not None and cached.is_file() and cached.stat().st_size == size_bytes:
+            return cached
+
+        root = (
+            Path("/tmp")
+            / "magellan-edge-probe-cache"
+            / self._local_node.id
+            / str(size_bytes)
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "payload.bin"
+        if not path.is_file() or path.stat().st_size != size_bytes:
+            temporary = path.with_suffix(".tmp")
+            remaining = size_bytes
+            with temporary.open("wb") as handle:
+                while remaining:
+                    chunk = min(1024 * 1024, remaining)
+                    handle.write(os.urandom(chunk))
+                    remaining -= chunk
+            os.replace(temporary, path)
+        self._probe_payload_paths[size_bytes] = path
+        return path
+
+    def _run_rsync_bandwidth_probe(
+        self, destination_node_id: str, size_bytes: int
+    ) -> tuple[int, float]:
+        """Measure the same rsync/SSH transfer component used by migration."""
+        destination = self._cluster.get_node(destination_node_id)
+        payload = self._probe_payload_path(size_bytes)
+        source_directory = payload.parent
+        remote_directory = (
+            f"/tmp/magellan-edge-probe/{self._local_node.id}/"
+            f"{uuid4().hex}"
+        )
+        target = f"{self._ssh_user}@{destination.internal_ip}"
+        connect_timeout = max(1, int(self._cluster.request_timeout_seconds))
+        ssh_options = [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"ConnectTimeout={connect_timeout}",
+        ]
+        ssh_transport = (
+            "ssh -o BatchMode=yes "
+            "-o StrictHostKeyChecking=accept-new "
+            f"-o ConnectTimeout={connect_timeout}"
+        )
+        timeout = self._policy.edge_bandwidth_probe_timeout_seconds
+
+        subprocess.run(
+            [
+                "ssh",
+                *ssh_options,
+                target,
+                f"mkdir -p {shlex.quote(remote_directory)}",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+        try:
+            started = time.perf_counter()
+            subprocess.run(
+                [
+                    "rsync",
+                    "-az",
+                    "--delete",
+                    "-e",
+                    ssh_transport,
+                    f"{source_directory}/",
+                    f"{target}:{remote_directory}/",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+            )
+            duration = max(1e-9, time.perf_counter() - started)
+        finally:
+            subprocess.run(
+                [
+                    "ssh",
+                    *ssh_options,
+                    target,
+                    f"rm -rf {shlex.quote(remote_directory)}",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+            )
+        return size_bytes, duration
+
+    def _measure_migration_transport_bandwidth(
+        self, destination_node_id: str
+    ) -> tuple[int, float]:
+        """Run one or two bounded probes targeting a useful sample duration."""
+        initial = self._policy.edge_bandwidth_probe_bytes
+        maximum = self._policy.edge_bandwidth_probe_max_bytes
+        target = self._policy.edge_bandwidth_probe_target_seconds
+
+        measured_bytes, duration = self._run_rsync_bandwidth_probe(
+            destination_node_id, initial
+        )
+        if duration >= target * 0.75 or initial >= maximum:
+            return measured_bytes, duration
+
+        projected = int(initial * target / max(duration, 1e-9))
+        # A small rsync sample is often dominated by SSH/protocol startup.
+        # Grow aggressively enough that the follow-up reaches steady-state
+        # throughput on fast edges, while the configured maximum bounds cost.
+        follow_up = min(maximum, max(initial * 8, projected))
+        if follow_up <= initial:
+            return measured_bytes, duration
+        return self._run_rsync_bandwidth_probe(
+            destination_node_id, follow_up
         )
 
     async def probe_edge(
@@ -213,9 +347,10 @@ class TelemetryService:
     ):
         """Refresh one directed edge using live peer measurements.
 
-        The peer set comes from the current cluster membership.  Bandwidth is
-        measured as an end-to-end upload sample; consumers must therefore not
-        add RTT again when using ``measured_transfer_ema``.
+        The peer set comes from current cluster membership. RTT is measured
+        over HTTP, while bandwidth uses the same rsync/SSH transport component
+        as checkpoint migration. Consumers must not add RTT again to measured
+        migration-transport throughput.
         """
         if destination_node_id == self._local_node.id:
             raise ValueError("Destination must be a peer")
@@ -246,48 +381,35 @@ class TelemetryService:
         if self._bandwidth_probe_due(
             destination_node_id, force=force_bandwidth
         ):
-            upload_url = (
-                f"http://{destination.internal_ip}:"
-                f"{self._cluster.api_port}/telemetry/probe/upload"
-            )
-            transfer_started = time.perf_counter()
-            try:
-                # Use a fresh connection so the sample includes connection and
-                # request/response effects, matching the end-to-end semantics
-                # of observed migration-transfer throughput.
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    response = await client.post(
-                        upload_url,
-                        content=self._bandwidth_probe_payload,
-                        headers={"Content-Type": "application/octet-stream"},
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                transfer_seconds = max(
-                    1e-9, time.perf_counter() - transfer_started
-                )
-                received_bytes = int(payload.get("received_bytes", -1))
-                if received_bytes != len(self._bandwidth_probe_payload):
-                    raise RuntimeError(
-                        "Peer bandwidth probe acknowledged "
-                        f"{received_bytes} bytes; expected "
-                        f"{len(self._bandwidth_probe_payload)}"
-                    )
-                self._store.record_transfer(
-                    self._local_node.id,
-                    destination_node_id,
-                    len(self._bandwidth_probe_payload),
-                    transfer_seconds,
-                )
-                self._last_bandwidth_probe_monotonic[
-                    destination_node_id
-                ] = time.monotonic()
-            except Exception as exc:
-                self._store.record_edge_failure(
-                    self._local_node.id,
-                    destination_node_id,
-                    f"bandwidth_probe:{type(exc).__name__}: {exc}",
-                )
+            # One source daemon must not benchmark multiple outgoing links at
+            # once: concurrent probes would measure self-contention instead of
+            # edge throughput. The lock also serializes background, lazy, and
+            # explicit preflight refreshes.
+            async with self._bandwidth_probe_lock:
+                if self._bandwidth_probe_due(
+                    destination_node_id, force=force_bandwidth
+                ):
+                    try:
+                        transfer_bytes, transfer_seconds = await asyncio.to_thread(
+                            self._measure_migration_transport_bandwidth,
+                            destination_node_id,
+                        )
+                        self._store.record_transfer(
+                            self._local_node.id,
+                            destination_node_id,
+                            transfer_bytes,
+                            transfer_seconds,
+                            sample_source="rsync_probe",
+                        )
+                        self._last_bandwidth_probe_monotonic[
+                            destination_node_id
+                        ] = time.monotonic()
+                    except Exception as exc:
+                        self._store.record_edge_failure(
+                            self._local_node.id,
+                            destination_node_id,
+                            f"bandwidth_probe:{type(exc).__name__}: {exc}",
+                        )
 
         return self.edge_view(destination_node_id)
 

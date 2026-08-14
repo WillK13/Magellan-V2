@@ -72,6 +72,7 @@ class EdgeTelemetryRecord(BaseModel):
 
     latency_sample_count: int = Field(default=0, ge=0)
     bandwidth_sample_count: int = Field(default=0, ge=0)
+    last_bandwidth_sample_source: str | None = None
 
     last_latency_sample_at_utc: datetime | None = None
     last_bandwidth_sample_at_utc: datetime | None = None
