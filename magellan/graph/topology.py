@@ -26,6 +26,9 @@ class EdgeMetrics:
     checkpoint_seconds: float | None = None
     restore_seconds: float | None = None
     migration_overhead_seconds: float = 0.0
+    transfer_fixed_seconds: float = 0.0
+    transfer_steady_bandwidth_mbps: float | None = None
+    transfer_model_source: str = "unavailable"
     calibration_source: str = "configured_fallback"
 
 
@@ -100,6 +103,9 @@ class ClusterGraph:
         checkpoint_seconds = None
         restore_seconds = None
         migration_overhead_seconds = 0.0
+        transfer_fixed_seconds = 0.0
+        transfer_steady_bandwidth_mbps = None
+        transfer_model_source = "unavailable"
         calibration_source = "configured_fallback"
 
         if self._telemetry_store is not None and self._telemetry_policy is not None:
@@ -116,6 +122,11 @@ class ClusterGraph:
             latency_source = view.latency_source
             bandwidth_freshness = view.bandwidth_freshness
             latency_freshness = view.latency_freshness
+            transfer_fixed_seconds = view.effective_transfer_fixed_seconds
+            transfer_steady_bandwidth_mbps = (
+                view.effective_transfer_steady_bandwidth_mbps
+            )
+            transfer_model_source = view.transfer_model_source
 
             calibration = self._telemetry_store.calibration_view(
                 source_node_id,
@@ -160,5 +171,8 @@ class ClusterGraph:
             checkpoint_seconds=checkpoint_seconds,
             restore_seconds=restore_seconds,
             migration_overhead_seconds=migration_overhead_seconds,
+            transfer_fixed_seconds=transfer_fixed_seconds,
+            transfer_steady_bandwidth_mbps=transfer_steady_bandwidth_mbps,
+            transfer_model_source=transfer_model_source,
             calibration_source=calibration_source,
         )

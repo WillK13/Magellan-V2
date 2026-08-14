@@ -59,7 +59,14 @@ def cluster() -> ClusterConfig:
 def test_graph_prefers_fresh_measured_edge_and_calibration(tmp_path) -> None:
     store = TelemetryStore(tmp_path)
     store.record_latency("boston", "virginia", 12)
-    store.record_transfer("boston", "virginia", 10_000_000, 2)
+    store.record_transfer_model_pair(
+        "boston",
+        "virginia",
+        1_000_000,
+        0.2,
+        10_000_000,
+        1.1,
+    )
     store.record_migration_calibration(
         "boston",
         "virginia",
@@ -72,13 +79,16 @@ def test_graph_prefers_fresh_measured_edge_and_calibration(tmp_path) -> None:
     )
     graph = ClusterGraph(cluster(), store, TelemetryPolicy())
     edge = graph.edge("boston", "virginia")
-    assert edge.bandwidth_mbps == pytest.approx(40)
+    assert edge.bandwidth_mbps == pytest.approx(72.7272727)
     assert edge.latency_ms == pytest.approx(12)
     assert edge.checkpoint_seconds == pytest.approx(3)
     assert edge.restore_seconds == pytest.approx(1)
     # 7 total - 3 checkpoint - 2 transfer - 1 restore.
     assert edge.migration_overhead_seconds == pytest.approx(1)
     assert edge.bandwidth_source == "measured_migration_transport_ema"
+    assert edge.transfer_fixed_seconds == pytest.approx(0.1)
+    assert edge.transfer_steady_bandwidth_mbps == pytest.approx(80)
+    assert edge.transfer_model_source == "measured_migration_transport_affine_ema"
     assert edge.calibration_source == "measured_migration_ema"
 
     estimate = estimate_migrate(
@@ -112,7 +122,9 @@ def test_graph_prefers_fresh_measured_edge_and_calibration(tmp_path) -> None:
     assert estimate.details["migration_overhead_seconds"] == pytest.approx(1)
     assert estimate.details["predicted_downtime_seconds"] > 1
     assert estimate.details["bandwidth_source"] == "measured_migration_transport_ema"
-    assert estimate.details["transfer_model"] == "end_to_end_measured_bandwidth"
+    assert estimate.details["transfer_model"] == "affine_migration_transport"
+    assert estimate.details["transfer_fixed_seconds"] == pytest.approx(0.1)
+    assert estimate.details["transfer_steady_bandwidth_mbps"] == pytest.approx(80)
     assert estimate.details["transfer_seconds"] == pytest.approx(0.2)
 
 
@@ -120,7 +132,15 @@ def test_graph_falls_back_when_edge_measurements_are_stale(tmp_path) -> None:
     old = datetime.now(timezone.utc) - timedelta(hours=1)
     store = TelemetryStore(tmp_path)
     store.record_latency("boston", "virginia", 12, old)
-    store.record_transfer("boston", "virginia", 10_000_000, 2, old)
+    store.record_transfer_model_pair(
+        "boston",
+        "virginia",
+        1_000_000,
+        0.2,
+        10_000_000,
+        1.1,
+        old,
+    )
     graph = ClusterGraph(
         cluster(),
         store,

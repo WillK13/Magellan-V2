@@ -123,10 +123,10 @@ class TelemetryPolicy(BaseModel):
 
     @model_validator(mode="after")
     def validate_edge_bandwidth_probe(self) -> "TelemetryPolicy":
-        if self.edge_bandwidth_probe_max_bytes < self.edge_bandwidth_probe_bytes:
+        if self.edge_bandwidth_probe_max_bytes <= self.edge_bandwidth_probe_bytes:
             raise ValueError(
-                "edge_bandwidth_probe_max_bytes must be >= "
-                "edge_bandwidth_probe_bytes"
+                "edge_bandwidth_probe_max_bytes must be > "
+                "edge_bandwidth_probe_bytes for two-point calibration"
             )
         return self
 

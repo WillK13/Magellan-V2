@@ -200,14 +200,14 @@ class TelemetryService:
         if force:
             return True
         view = self.edge_view(destination_node_id)
-        if view.bandwidth_freshness.value == "unavailable":
+        if view.transfer_model_freshness.value == "unavailable":
             return True
         last = self._last_bandwidth_probe_monotonic.get(destination_node_id)
         if last is None:
             # Persisted telemetry survives daemon restarts. Refresh it on the
             # configured maintenance interval; decision-time freshness checks
             # still force an immediate probe when a stale edge matters.
-            age = view.bandwidth_age_seconds or 0.0
+            age = view.transfer_model_age_seconds or 0.0
             return age >= self._policy.edge_bandwidth_probe_interval_seconds
         return (
             time.monotonic() - last
@@ -314,30 +314,30 @@ class TelemetryService:
             )
         return size_bytes, duration
 
-    def _measure_migration_transport_bandwidth(
+    def _measure_migration_transport_model(
         self, destination_node_id: str
-    ) -> tuple[int, float]:
-        """Run one or two bounded probes targeting a useful sample duration."""
+    ) -> tuple[tuple[int, float], tuple[int, float]]:
+        """Collect two bounded rsync samples for an affine transfer model."""
         initial = self._policy.edge_bandwidth_probe_bytes
         maximum = self._policy.edge_bandwidth_probe_max_bytes
         target = self._policy.edge_bandwidth_probe_target_seconds
 
-        measured_bytes, duration = self._run_rsync_bandwidth_probe(
-            destination_node_id, initial
-        )
-        if duration >= target * 0.75 or initial >= maximum:
-            return measured_bytes, duration
+        small = self._run_rsync_bandwidth_probe(destination_node_id, initial)
+        _, small_duration = small
 
-        projected = int(initial * target / max(duration, 1e-9))
-        # A small rsync sample is often dominated by SSH/protocol startup.
-        # Grow aggressively enough that the follow-up reaches steady-state
-        # throughput on fast edges, while the configured maximum bounds cost.
-        follow_up = min(maximum, max(initial * 8, projected))
+        # Keep calibration sizes distinct from the 4 MiB held-out validation
+        # point: slow edges use a modest 2x follow-up, while fast edges use the
+        # configured maximum to expose steady-state throughput.
+        if small_duration >= target * 0.75:
+            follow_up = min(maximum, initial * 2)
+        else:
+            follow_up = maximum
         if follow_up <= initial:
-            return measured_bytes, duration
-        return self._run_rsync_bandwidth_probe(
-            destination_node_id, follow_up
-        )
+            raise RuntimeError(
+                "edge_bandwidth_probe_max_bytes must exceed the initial probe size"
+            )
+        large = self._run_rsync_bandwidth_probe(destination_node_id, follow_up)
+        return small, large
 
     async def probe_edge(
         self,
@@ -348,9 +348,9 @@ class TelemetryService:
         """Refresh one directed edge using live peer measurements.
 
         The peer set comes from current cluster membership. RTT is measured
-        over HTTP, while bandwidth uses the same rsync/SSH transport component
-        as checkpoint migration. Consumers must not add RTT again to measured
-        migration-transport throughput.
+        over HTTP, while migration transport uses two rsync/SSH payload sizes
+        to fit fixed transport cost plus steady-state throughput. This is the
+        same timed transfer component used by checkpoint migration.
         """
         if destination_node_id == self._local_node.id:
             raise ValueError("Destination must be a peer")
@@ -390,16 +390,18 @@ class TelemetryService:
                     destination_node_id, force=force_bandwidth
                 ):
                     try:
-                        transfer_bytes, transfer_seconds = await asyncio.to_thread(
-                            self._measure_migration_transport_bandwidth,
+                        small, large = await asyncio.to_thread(
+                            self._measure_migration_transport_model,
                             destination_node_id,
                         )
-                        self._store.record_transfer(
+                        self._store.record_transfer_model_pair(
                             self._local_node.id,
                             destination_node_id,
-                            transfer_bytes,
-                            transfer_seconds,
-                            sample_source="rsync_probe",
+                            small[0],
+                            small[1],
+                            large[0],
+                            large[1],
+                            sample_source="rsync_two_point_probe",
                         )
                         self._last_bandwidth_probe_monotonic[
                             destination_node_id
@@ -423,7 +425,7 @@ class TelemetryService:
             view = self.edge_view(destination_node_id)
             if (
                 view.latency_freshness.value != "fresh"
-                or view.bandwidth_freshness.value != "fresh"
+                or view.transfer_model_freshness.value != "fresh"
             ):
                 stale.append(destination_node_id)
 

@@ -85,8 +85,11 @@ def main() -> int:
             observed_edges += 1
             measured = (
                 view.get("bandwidth_source") == "measured_migration_transport_ema"
+                and view.get("transfer_model_source")
+                == "measured_migration_transport_affine_ema"
                 and view.get("latency_source") == "measured_http_rtt"
                 and view.get("bandwidth_freshness") == "fresh"
+                and view.get("transfer_model_freshness") == "fresh"
                 and view.get("latency_freshness") == "fresh"
             )
             if measured:

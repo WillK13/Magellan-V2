@@ -659,6 +659,7 @@ async def record_edge_telemetry_sample(
             destination_node_id,
             sample.transfer_bytes,
             sample.transfer_duration_seconds,
+            sample_source="operator_sample",
         )
 
     configured = context.cluster.get_edge_override(

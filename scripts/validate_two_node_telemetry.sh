@@ -64,7 +64,9 @@ cal=json.load(open('/tmp/telemetry-calibration.json'))
 matching=[x for x in cal if x['source_node_id']=='boston' and x['destination_node_id']=='virginia']
 ok=(edge['bandwidth_freshness']=='fresh' and
     edge['bandwidth_source']=='measured_migration_transport_ema' and
-    edge['effective_bandwidth_mbps']>0 and matching and
+    edge['transfer_model_freshness']=='fresh' and
+    edge['transfer_model_source']=='measured_migration_transport_affine_ema' and
+    edge['effective_transfer_steady_bandwidth_mbps']>0 and matching and
     matching[0]['freshness']=='fresh' and matching[0]['sample_count']>=1 and
     matching[0]['checkpoint_seconds_ema'] is not None and
     matching[0]['restore_seconds_ema'] is not None and
@@ -180,6 +182,8 @@ edge=json.load(open('/tmp/telemetry-edge-after.json'))
 cal=json.load(open('/tmp/telemetry-calibration.json'))
 record=next(x for x in cal if x['source_node_id']=='boston' and x['destination_node_id']=='virginia')
 assert edge['bandwidth_source']=='measured_migration_transport_ema', edge
+assert edge['transfer_model_source']=='measured_migration_transport_affine_ema', edge
+assert edge['effective_transfer_steady_bandwidth_mbps']>0, edge
 assert record['freshness']=='fresh', record
 assert record['checkpoint_seconds_ema']>=0, record
 assert record['transfer_seconds_ema']>0, record

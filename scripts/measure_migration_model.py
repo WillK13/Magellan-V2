@@ -545,6 +545,17 @@ def main() -> int:
                     "telemetry_bandwidth_source_before": edge_telemetry.get(
                         "bandwidth_source"
                     ),
+                    "telemetry_transfer_fixed_seconds_before": edge_telemetry.get(
+                        "effective_transfer_fixed_seconds"
+                    ),
+                    "telemetry_transfer_steady_bandwidth_mbps_before": (
+                        edge_telemetry.get(
+                            "effective_transfer_steady_bandwidth_mbps"
+                        )
+                    ),
+                    "telemetry_transfer_model_source_before": edge_telemetry.get(
+                        "transfer_model_source"
+                    ),
                     "telemetry_latency_ms_before": edge_telemetry.get(
                         "effective_latency_ms"
                     ),
@@ -595,6 +606,12 @@ def main() -> int:
                     "candidate_bandwidth_source": predicted.get("bandwidth_source"),
                     "candidate_latency_source": predicted.get("latency_source"),
                     "candidate_transfer_model": predicted.get("transfer_model"),
+                    "candidate_transfer_fixed_seconds": predicted.get(
+                        "transfer_fixed_seconds"
+                    ),
+                    "candidate_transfer_steady_bandwidth_mbps": predicted.get(
+                        "transfer_steady_bandwidth_mbps"
+                    ),
                     "edge_preflight_enabled": not args.skip_edge_preflight,
                     "predicted_checkpoint_seconds": predicted_checkpoint,
                     "actual_checkpoint_seconds": actual_checkpoint,

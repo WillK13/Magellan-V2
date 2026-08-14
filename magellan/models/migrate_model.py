@@ -55,13 +55,23 @@ def estimate_migrate(
 
     total_transfer_bytes = task.checkpoint_bytes + static_data_bytes
 
-    if edge.bandwidth_source in {
+    if (
+        edge.transfer_model_source == "measured_migration_transport_affine_ema"
+        and edge.transfer_steady_bandwidth_mbps is not None
+    ):
+        transfer_duration_seconds = (
+            edge.transfer_fixed_seconds
+            + total_transfer_bytes
+            * 8.0
+            / (edge.transfer_steady_bandwidth_mbps * 1_000_000.0)
+        )
+        transfer_model = "affine_migration_transport"
+    elif edge.bandwidth_source in {
         "measured_transfer_ema",
         "measured_migration_transport_ema",
     }:
-        # Measured transfer throughput is end-to-end: the observed duration
-        # already contains connection/protocol/RTT effects. Adding latency a
-        # second time would systematically over-predict transfer time.
+        # Compatibility path for older persisted telemetry that predates the
+        # two-point transport model. Its measured duration is already end-to-end.
         transfer_duration_seconds = (
             total_transfer_bytes
             * 8.0
@@ -193,6 +203,11 @@ def estimate_migrate(
             "latency_ms": edge.latency_ms,
             "bandwidth_source": edge.bandwidth_source,
             "latency_source": edge.latency_source,
+            "transfer_fixed_seconds": edge.transfer_fixed_seconds,
+            "transfer_steady_bandwidth_mbps": (
+                edge.transfer_steady_bandwidth_mbps
+            ),
+            "transfer_model_source": edge.transfer_model_source,
             "checkpoint_seconds": checkpoint_seconds,
             "restore_seconds": restore_seconds,
             "migration_overhead_seconds": migration_overhead_seconds,

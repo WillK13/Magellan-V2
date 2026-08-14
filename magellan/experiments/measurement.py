@@ -100,6 +100,25 @@ def predict_transfer_seconds(
     )
 
 
+
+
+def predict_affine_transfer_seconds(
+    *,
+    size_bytes: int,
+    fixed_seconds: float,
+    steady_bandwidth_mbps: float,
+) -> float:
+    if size_bytes < 0:
+        raise ValueError("size_bytes must be non-negative")
+    if fixed_seconds < 0:
+        raise ValueError("fixed_seconds must be non-negative")
+    if steady_bandwidth_mbps <= 0:
+        raise ValueError("steady_bandwidth_mbps must be positive")
+    return (
+        fixed_seconds
+        + size_bytes * 8.0 / (steady_bandwidth_mbps * 1_000_000.0)
+    )
+
 def directed_edge_pairs(node_ids: Iterable[str]) -> list[tuple[str, str]]:
     ids = list(node_ids)
     return [(source, destination) for source in ids for destination in ids if source != destination]

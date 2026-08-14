@@ -165,14 +165,18 @@ async def test_edge_refresh_is_topology_driven_and_lazy(tmp_path, monkeypatch) -
     )
 
     store.record_latency("boston", "virginia", 20)
-    store.record_transfer("boston", "virginia", 1_000_000, 0.2)
+    store.record_transfer_model_pair(
+        "boston", "virginia", 1_000_000, 0.2, 2_000_000, 0.3
+    )
 
     called: list[tuple[str, bool]] = []
 
     async def fake_probe(destination_node_id: str, *, force_bandwidth: bool = False):
         called.append((destination_node_id, force_bandwidth))
         store.record_latency("boston", destination_node_id, 25)
-        store.record_transfer("boston", destination_node_id, 1_000_000, 0.25)
+        store.record_transfer_model_pair(
+            "boston", destination_node_id, 1_000_000, 0.25, 2_000_000, 0.4
+        )
         return service.edge_view(destination_node_id)
 
     monkeypatch.setattr(service, "probe_edge", fake_probe)
@@ -211,16 +215,14 @@ def test_adaptive_rsync_probe_grows_fast_edge_payload_within_bound(
 
     monkeypatch.setattr(service, "_run_rsync_bandwidth_probe", fake_probe)
 
-    measured_bytes, measured_seconds = (
-        service._measure_migration_transport_bandwidth("virginia")
-    )
+    small, large = service._measure_migration_transport_model("virginia")
 
     assert calls == [1_048_576, 8_388_608]
-    assert measured_bytes == 8_388_608
-    assert measured_seconds == pytest.approx(2.5)
+    assert small == (1_048_576, pytest.approx(0.25))
+    assert large == (8_388_608, pytest.approx(2.5))
 
 
-def test_adaptive_rsync_probe_keeps_slow_initial_sample(tmp_path, monkeypatch) -> None:
+def test_adaptive_rsync_probe_uses_second_size_on_slow_edge(tmp_path, monkeypatch) -> None:
     boston = node()
     virginia = peer_node("virginia", "10.0.0.2")
     service = TelemetryService(
@@ -240,14 +242,12 @@ def test_adaptive_rsync_probe_keeps_slow_initial_sample(tmp_path, monkeypatch) -
 
     def fake_probe(_destination_node_id: str, size_bytes: int):
         calls.append(size_bytes)
-        return size_bytes, 3.2
+        return size_bytes, 3.2 if len(calls) == 1 else 6.1
 
     monkeypatch.setattr(service, "_run_rsync_bandwidth_probe", fake_probe)
 
-    measured_bytes, measured_seconds = (
-        service._measure_migration_transport_bandwidth("virginia")
-    )
+    small, large = service._measure_migration_transport_model("virginia")
 
-    assert calls == [1_048_576]
-    assert measured_bytes == 1_048_576
-    assert measured_seconds == pytest.approx(3.2)
+    assert calls == [1_048_576, 2_097_152]
+    assert small == (1_048_576, pytest.approx(3.2))
+    assert large == (2_097_152, pytest.approx(6.1))

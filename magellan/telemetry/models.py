@@ -69,13 +69,22 @@ class EdgeTelemetryRecord(BaseModel):
 
     latency_ms_ema: float | None = Field(default=None, ge=0)
     bandwidth_mbps_ema: float | None = Field(default=None, gt=0)
+    transfer_fixed_seconds_ema: float | None = Field(default=None, ge=0)
+    transfer_steady_bandwidth_mbps_ema: float | None = Field(default=None, gt=0)
 
     latency_sample_count: int = Field(default=0, ge=0)
     bandwidth_sample_count: int = Field(default=0, ge=0)
+    transfer_model_sample_count: int = Field(default=0, ge=0)
     last_bandwidth_sample_source: str | None = None
+    last_transfer_model_source: str | None = None
+    last_transfer_model_small_bytes: int | None = Field(default=None, gt=0)
+    last_transfer_model_small_seconds: float | None = Field(default=None, gt=0)
+    last_transfer_model_large_bytes: int | None = Field(default=None, gt=0)
+    last_transfer_model_large_seconds: float | None = Field(default=None, gt=0)
 
     last_latency_sample_at_utc: datetime | None = None
     last_bandwidth_sample_at_utc: datetime | None = None
+    last_transfer_model_sample_at_utc: datetime | None = None
     last_success_at_utc: datetime | None = None
     last_failure_at_utc: datetime | None = None
     consecutive_failures: int = Field(default=0, ge=0)
@@ -89,10 +98,15 @@ class EdgeTelemetryView(EdgeTelemetryRecord):
     effective_bandwidth_mbps: float = Field(gt=0)
     latency_source: str
     bandwidth_source: str
+    effective_transfer_fixed_seconds: float = Field(default=0.0, ge=0)
+    effective_transfer_steady_bandwidth_mbps: float | None = Field(default=None, gt=0)
+    transfer_model_source: str
     latency_freshness: TelemetryFreshness
     bandwidth_freshness: TelemetryFreshness
+    transfer_model_freshness: TelemetryFreshness
     latency_age_seconds: float | None = Field(default=None, ge=0)
     bandwidth_age_seconds: float | None = Field(default=None, ge=0)
+    transfer_model_age_seconds: float | None = Field(default=None, ge=0)
 
 
 class MigrationCalibrationRecord(BaseModel):

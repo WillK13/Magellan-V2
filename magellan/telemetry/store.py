@@ -50,6 +50,36 @@ def _ema(previous: float | None, observed: float, alpha: float) -> float:
     return alpha * observed + (1.0 - alpha) * previous
 
 
+def _fit_transfer_model(
+    small_bytes: int,
+    small_seconds: float,
+    large_bytes: int,
+    large_seconds: float,
+) -> tuple[float, float]:
+    """Fit t = fixed + bytes / rate from two transport-faithful samples."""
+    if small_bytes <= 0 or large_bytes <= small_bytes:
+        raise ValueError("Transfer-model samples need two increasing payload sizes")
+    if small_seconds <= 0 or large_seconds <= 0:
+        raise ValueError("Transfer-model sample durations must be positive")
+
+    delta_seconds = large_seconds - small_seconds
+    delta_bytes = large_bytes - small_bytes
+    if delta_seconds <= 1e-9:
+        # Jitter can occasionally make the larger sample appear no slower.
+        # Fall back to a zero-intercept model based on the larger held sample
+        # rather than manufacturing a negative transport cost.
+        return 0.0, large_bytes * 8.0 / large_seconds / 1_000_000.0
+
+    steady_bandwidth_mbps = (
+        delta_bytes * 8.0 / delta_seconds / 1_000_000.0
+    )
+    payload_seconds_small = (
+        small_bytes * 8.0 / (steady_bandwidth_mbps * 1_000_000.0)
+    )
+    fixed_seconds = max(0.0, small_seconds - payload_seconds_small)
+    return fixed_seconds, steady_bandwidth_mbps
+
+
 class TelemetryStore:
     def __init__(self, state_root: str | Path, ema_alpha: float = 0.35) -> None:
         self._path = Path(state_root) / "control" / "telemetry.json"
@@ -191,7 +221,103 @@ class TelemetryStore:
             record.bandwidth_sample_count += 1
             record.last_bandwidth_sample_source = sample_source
             record.last_bandwidth_sample_at_utc = _utc(sampled_at_utc)
+
+            # Once a two-point affine transport model exists, real migrations
+            # refine its steady-state rate while keeping the separately learned
+            # fixed rsync/SSH cost. A single observation cannot identify both.
+            if (
+                sample_source == "migration_transfer"
+                and record.transfer_fixed_seconds_ema is not None
+                and record.transfer_steady_bandwidth_mbps_ema is not None
+            ):
+                payload_seconds = (
+                    duration_seconds - record.transfer_fixed_seconds_ema
+                )
+                if payload_seconds > 1e-9:
+                    observed_steady_bandwidth = (
+                        transfer_bytes
+                        * 8.0
+                        / payload_seconds
+                        / 1_000_000.0
+                    )
+                    record.transfer_steady_bandwidth_mbps_ema = _ema(
+                        record.transfer_steady_bandwidth_mbps_ema,
+                        observed_steady_bandwidth,
+                        self._ema_alpha,
+                    )
+                    record.transfer_model_sample_count += 1
+                    record.last_transfer_model_source = (
+                        "migration_observation_refined"
+                    )
+                    record.last_transfer_model_sample_at_utc = (
+                        record.last_bandwidth_sample_at_utc
+                    )
+
             record.last_success_at_utc = record.last_bandwidth_sample_at_utc
+            record.consecutive_failures = 0
+            record.last_error = None
+            self._document.edge_records[key] = record
+            self._persist()
+            return record.model_copy(deep=True)
+
+    def record_transfer_model_pair(
+        self,
+        source_node_id: str,
+        destination_node_id: str,
+        small_bytes: int,
+        small_seconds: float,
+        large_bytes: int,
+        large_seconds: float,
+        sampled_at_utc: datetime | None = None,
+        *,
+        sample_source: str = "rsync_two_point_probe",
+    ) -> EdgeTelemetryRecord:
+        fixed_seconds, steady_bandwidth_mbps = _fit_transfer_model(
+            small_bytes,
+            small_seconds,
+            large_bytes,
+            large_seconds,
+        )
+        key = self.edge_key(source_node_id, destination_node_id)
+        sampled_at = _utc(sampled_at_utc)
+        with self._lock:
+            record = self._document.edge_records.get(key) or EdgeTelemetryRecord(
+                source_node_id=source_node_id,
+                destination_node_id=destination_node_id,
+            )
+
+            # Preserve the scalar bandwidth telemetry for compatibility and
+            # observability, but use the affine model for migration prediction.
+            large_effective_bandwidth = (
+                large_bytes * 8.0 / large_seconds / 1_000_000.0
+            )
+            record.bandwidth_mbps_ema = _ema(
+                record.bandwidth_mbps_ema,
+                large_effective_bandwidth,
+                self._ema_alpha,
+            )
+            record.bandwidth_sample_count += 2
+            record.last_bandwidth_sample_source = sample_source
+            record.last_bandwidth_sample_at_utc = sampled_at
+
+            record.transfer_fixed_seconds_ema = _ema(
+                record.transfer_fixed_seconds_ema,
+                fixed_seconds,
+                self._ema_alpha,
+            )
+            record.transfer_steady_bandwidth_mbps_ema = _ema(
+                record.transfer_steady_bandwidth_mbps_ema,
+                steady_bandwidth_mbps,
+                self._ema_alpha,
+            )
+            record.transfer_model_sample_count += 1
+            record.last_transfer_model_source = sample_source
+            record.last_transfer_model_small_bytes = small_bytes
+            record.last_transfer_model_small_seconds = small_seconds
+            record.last_transfer_model_large_bytes = large_bytes
+            record.last_transfer_model_large_seconds = large_seconds
+            record.last_transfer_model_sample_at_utc = sampled_at
+            record.last_success_at_utc = sampled_at
             record.consecutive_failures = 0
             record.last_error = None
             self._document.edge_records[key] = record
@@ -246,6 +372,11 @@ class TelemetryStore:
         bandwidth_freshness = _freshness(
             record.last_bandwidth_sample_at_utc, stale_after_seconds, now
         )
+        transfer_model_freshness = _freshness(
+            record.last_transfer_model_sample_at_utc,
+            stale_after_seconds,
+            now,
+        )
         use_latency = (
             latency_freshness == TelemetryFreshness.FRESH
             and record.latency_ms_ema is not None
@@ -253,6 +384,11 @@ class TelemetryStore:
         use_bandwidth = (
             bandwidth_freshness == TelemetryFreshness.FRESH
             and record.bandwidth_mbps_ema is not None
+        )
+        use_transfer_model = (
+            transfer_model_freshness == TelemetryFreshness.FRESH
+            and record.transfer_fixed_seconds_ema is not None
+            and record.transfer_steady_bandwidth_mbps_ema is not None
         )
         return EdgeTelemetryView(
             **record.model_dump(),
@@ -272,11 +408,28 @@ class TelemetryStore:
                 if use_bandwidth
                 else "configured_fallback"
             ),
+            effective_transfer_fixed_seconds=(
+                record.transfer_fixed_seconds_ema if use_transfer_model else 0.0
+            ),
+            effective_transfer_steady_bandwidth_mbps=(
+                record.transfer_steady_bandwidth_mbps_ema
+                if use_transfer_model
+                else None
+            ),
+            transfer_model_source=(
+                "measured_migration_transport_affine_ema"
+                if use_transfer_model
+                else "unavailable"
+            ),
             latency_freshness=latency_freshness,
             bandwidth_freshness=bandwidth_freshness,
+            transfer_model_freshness=transfer_model_freshness,
             latency_age_seconds=_age_seconds(record.last_latency_sample_at_utc, now),
             bandwidth_age_seconds=_age_seconds(
                 record.last_bandwidth_sample_at_utc, now
+            ),
+            transfer_model_age_seconds=_age_seconds(
+                record.last_transfer_model_sample_at_utc, now
             ),
         )
 

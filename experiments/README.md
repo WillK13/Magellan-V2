@@ -65,3 +65,16 @@ measurement. Actual migrations and transport-faithful probes update the same
 migration-transport EMA; unseen or stale edges are refreshed lazily before they are
 used by scheduling decisions. No node IDs, edge counts, or measured bandwidth values
 are hard-coded into the scheduler.
+
+### Stage 3A.4 size-aware held-out transfer validation
+
+A single effective Mbps value is not sufficient for rsync-over-SSH because fixed
+transport startup cost is significant for small payloads. Each fresh directed edge
+now uses two bounded, transport-faithful rsync probes to fit an affine model:
+`transfer_seconds = fixed_seconds + bytes / steady_state_rate`. Slow edges use a
+small 2x follow-up; fast edges use the configured bounded maximum. Real migrations
+refine the steady-state rate while preserving the separately learned fixed cost.
+The directed-network characterization refreshes each edge immediately before
+prediction and then tests a separate 4 MiB transfer without feeding that held-out
+sample back into telemetry. The mechanism remains topology-derived for arbitrary
+cluster size; no node IDs or measured link values are embedded in scheduler logic.

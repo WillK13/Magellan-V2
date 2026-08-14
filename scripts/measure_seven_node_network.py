@@ -16,7 +16,7 @@ from magellan.experiments.bundle import sha256_file, write_checksums, write_csv,
 from magellan.experiments.measurement import (
     absolute_percent_error,
     directed_edge_pairs,
-    predict_transfer_seconds,
+    predict_affine_transfer_seconds,
     signed_percent_error,
     summarize_samples,
 )
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssh-user", default="WILL")
     parser.add_argument("--rtt-samples", type=int, default=10)
     parser.add_argument("--bandwidth-samples", type=int, default=2)
-    parser.add_argument("--payload-bytes", type=int, default=16 * 1024 * 1024)
+    parser.add_argument("--payload-bytes", type=int, default=4 * 1024 * 1024)
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument("--measurements-root", default="experiments/measurements")
     parser.add_argument("--measurement-id", default=None)
@@ -42,8 +42,8 @@ def parse_args() -> argparse.Namespace:
         "--seed-telemetry",
         action="store_true",
         help=(
-            "Record the measured RTT/transfer samples into each source daemon's "
-            "edge telemetry after collecting the cold prediction."
+            "Deprecated compatibility flag. Stage 3A.4 uses held-out validation "
+            "and never feeds the held-out transfer back into telemetry."
         ),
     )
     parser.add_argument("--expected-carbon-metric", default="lifecycle")
@@ -144,7 +144,7 @@ def main() -> int:
     )
 
     health: dict[str, dict[str, Any]] = {}
-    print("== Verify seven peer APIs ==")
+    print("== Verify configured peer APIs ==")
     for node in cluster.nodes:
         value = request_json(f"http://{node.internal_ip}:{cluster.api_port}/health")
         if value.get("node_id") != node.id:
@@ -184,7 +184,7 @@ print(path.stat().st_size)
 """
     print("== Prepare incompressible source payloads ==")
     for node in cluster.nodes:
-        payload_path = f"/tmp/{measurement_id}-{node.id}.bin"
+        payload_path = f"/tmp/{measurement_id}-{node.id}/payload.bin"
         result = run_at_source(
             local_node_id=local.id,
             source_node_id=node.id,
@@ -215,35 +215,79 @@ for _ in range(count):
     print(float(value) * 1000.0)
 """
     bandwidth_code = """
-import json, subprocess, sys, time
+import json, pathlib, shlex, subprocess, sys, time
 payload, user, destination_ip, measurement_id, source_id, destination_id, count = sys.argv[1:]
 count = int(count)
 target = f'{user}@{destination_ip}'
+source_directory = pathlib.Path(payload).parent
 values = []
 for sample in range(count):
-    remote = f'/tmp/{measurement_id}-{source_id}-{destination_id}-{sample}.bin'
-    started = time.perf_counter()
-    subprocess.run([
-        'rsync', '-az', '--delete',
-        '-e', 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
-        payload, f'{target}:{remote}',
-    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    duration = max(1e-9, time.perf_counter() - started)
-    values.append(duration)
+    remote = f'/tmp/{measurement_id}-{source_id}-{destination_id}-{sample}'
     subprocess.run([
         'ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
-        target, f'rm -f {remote}',
+        target, f'mkdir -p {shlex.quote(remote)}',
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        started = time.perf_counter()
+        subprocess.run([
+            'rsync', '-az', '--delete',
+            '-e', 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
+            f'{source_directory}/', f'{target}:{remote}/',
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        duration = max(1e-9, time.perf_counter() - started)
+        values.append(duration)
+    finally:
+        subprocess.run([
+            'ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
+            target, f'rm -rf {shlex.quote(remote)}',
+        ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
 print(json.dumps(values))
 """
 
+    if args.seed_telemetry:
+        print(
+            "NOTE: --seed-telemetry is deprecated; held-out samples are not "
+            "fed back into telemetry."
+        )
+
     try:
-        print(f"== Measure all {len(pairs)} directed edges ==")
+        print(f"== Held-out validation across {len(pairs)} directed edges ==")
         for index, (source_id, destination_id) in enumerate(pairs, start=1):
             source = node_by_id[source_id]
             destination = node_by_id[destination_id]
             source_api = f"http://{source.internal_ip}:{cluster.api_port}"
-            telemetry = request_json(f"{source_api}/telemetry/edges/{destination_id}")
+
+            # Match autonomous decision semantics: immediately refresh the
+            # specific edge, then predict a transfer size not used to fit the
+            # two-point calibration model.
+            telemetry = request_json(
+                f"{source_api}/telemetry/edges/{destination_id}/refresh",
+                method="POST",
+                timeout=max(180.0, args.timeout_seconds * 6.0),
+            )
+            if (
+                telemetry.get("transfer_model_source")
+                != "measured_migration_transport_affine_ema"
+                or telemetry.get("transfer_model_freshness") != "fresh"
+            ):
+                raise RuntimeError(
+                    f"Fresh affine transfer model unavailable for "
+                    f"{source_id}->{destination_id}: "
+                    f"{telemetry.get('transfer_model_source')} / "
+                    f"{telemetry.get('transfer_model_freshness')}"
+                )
+
+            fixed_seconds = float(
+                telemetry["effective_transfer_fixed_seconds"]
+            )
+            steady_bandwidth = float(
+                telemetry["effective_transfer_steady_bandwidth_mbps"]
+            )
+            predicted_seconds = predict_affine_transfer_seconds(
+                size_bytes=args.payload_bytes,
+                fixed_seconds=fixed_seconds,
+                steady_bandwidth_mbps=steady_bandwidth,
+            )
 
             rtt_result = run_at_source(
                 local_node_id=local.id,
@@ -293,30 +337,27 @@ print(json.dumps(values))
                     destination_id,
                     str(args.bandwidth_samples),
                 ),
-                timeout=args.bandwidth_samples * max(60.0, args.timeout_seconds) + 60.0,
-            )
-            transfer_values = json.loads(transfer_result.stdout.strip().splitlines()[-1])
-            if len(transfer_values) != args.bandwidth_samples:
-                raise RuntimeError(
-                    f"Bandwidth sample count mismatch for {source_id}->{destination_id}"
-                )
-
-            effective_bandwidth = float(telemetry["effective_bandwidth_mbps"])
-            effective_latency = float(telemetry["effective_latency_ms"])
-            predicted_seconds = predict_transfer_seconds(
-                size_bytes=args.payload_bytes,
-                bandwidth_mbps=effective_bandwidth,
-                latency_ms=effective_latency,
-                bandwidth_is_end_to_end=(
-                    str(telemetry.get("bandwidth_source", "")).startswith(
-                        "measured_"
-                    )
+                timeout=(
+                    args.bandwidth_samples
+                    * max(60.0, args.timeout_seconds)
+                    + 60.0
                 ),
             )
+            transfer_values = json.loads(
+                transfer_result.stdout.strip().splitlines()[-1]
+            )
+            if len(transfer_values) != args.bandwidth_samples:
+                raise RuntimeError(
+                    f"Bandwidth sample count mismatch for "
+                    f"{source_id}->{destination_id}"
+                )
+
             measured_bandwidths: list[float] = []
             for sample_index, duration in enumerate(transfer_values, start=1):
                 duration = float(duration)
-                bandwidth_mbps = args.payload_bytes * 8.0 / duration / 1_000_000.0
+                bandwidth_mbps = (
+                    args.payload_bytes * 8.0 / duration / 1_000_000.0
+                )
                 measured_bandwidths.append(bandwidth_mbps)
                 bandwidth_rows.append(
                     {
@@ -339,52 +380,30 @@ print(json.dumps(values))
             rtt_summary = summarize_samples(rtt_values)
             bandwidth_summary = summarize_samples(measured_bandwidths)
             duration_summary = summarize_samples(transfer_values)
-
-            post_telemetry = telemetry
-            post_predicted_seconds = predicted_seconds
-            if args.seed_telemetry:
-                for rtt_ms in rtt_values:
-                    post_telemetry = request_json(
-                        f"{source_api}/telemetry/edges/{destination_id}/sample",
-                        method="POST",
-                        payload={"latency_ms": rtt_ms},
-                    )
-                for duration in transfer_values:
-                    post_telemetry = request_json(
-                        f"{source_api}/telemetry/edges/{destination_id}/sample",
-                        method="POST",
-                        payload={
-                            "transfer_bytes": args.payload_bytes,
-                            "transfer_duration_seconds": float(duration),
-                        },
-                    )
-                post_predicted_seconds = predict_transfer_seconds(
-                    size_bytes=args.payload_bytes,
-                    bandwidth_mbps=float(
-                        post_telemetry["effective_bandwidth_mbps"]
-                    ),
-                    latency_ms=float(post_telemetry["effective_latency_ms"]),
-                    bandwidth_is_end_to_end=(
-                        str(
-                            post_telemetry.get("bandwidth_source", "")
-                        ).startswith("measured_")
-                    ),
-                )
             edge_rows.append(
                 {
                     "source_node_id": source_id,
                     "destination_node_id": destination_id,
                     "configured_latency_ms": telemetry["configured_latency_ms"],
-                    "telemetry_latency_ms": effective_latency,
+                    "telemetry_latency_ms": telemetry["effective_latency_ms"],
                     "telemetry_latency_source": telemetry["latency_source"],
                     "telemetry_latency_freshness": telemetry["latency_freshness"],
                     "measured_rtt_median_ms": rtt_summary.median,
                     "measured_rtt_p95_ms": rtt_summary.p95,
                     "rtt_cv": rtt_summary.coefficient_of_variation,
                     "configured_bandwidth_mbps": telemetry["configured_bandwidth_mbps"],
-                    "telemetry_bandwidth_mbps": effective_bandwidth,
+                    "telemetry_bandwidth_mbps": telemetry["effective_bandwidth_mbps"],
                     "telemetry_bandwidth_source": telemetry["bandwidth_source"],
                     "telemetry_bandwidth_freshness": telemetry["bandwidth_freshness"],
+                    "transfer_model_source": telemetry["transfer_model_source"],
+                    "transfer_model_freshness": telemetry["transfer_model_freshness"],
+                    "transfer_fixed_seconds": fixed_seconds,
+                    "transfer_steady_bandwidth_mbps": steady_bandwidth,
+                    "calibration_small_bytes": telemetry.get("last_transfer_model_small_bytes"),
+                    "calibration_small_seconds": telemetry.get("last_transfer_model_small_seconds"),
+                    "calibration_large_bytes": telemetry.get("last_transfer_model_large_bytes"),
+                    "calibration_large_seconds": telemetry.get("last_transfer_model_large_seconds"),
+                    "held_out_payload_bytes": args.payload_bytes,
                     "measured_bandwidth_median_mbps": bandwidth_summary.median,
                     "measured_bandwidth_p95_mbps": bandwidth_summary.p95,
                     "bandwidth_cv": bandwidth_summary.coefficient_of_variation,
@@ -396,46 +415,22 @@ print(json.dumps(values))
                     "median_transfer_absolute_error_percent": absolute_percent_error(
                         predicted_seconds, duration_summary.median
                     ),
-                    "post_seed_bandwidth_mbps": post_telemetry.get(
-                        "effective_bandwidth_mbps"
-                    ),
-                    "post_seed_bandwidth_source": post_telemetry.get(
-                        "bandwidth_source"
-                    ),
-                    "post_seed_latency_ms": post_telemetry.get(
-                        "effective_latency_ms"
-                    ),
-                    "post_seed_latency_source": post_telemetry.get(
-                        "latency_source"
-                    ),
-                    "post_seed_predicted_transfer_seconds": post_predicted_seconds,
-                    "post_seed_transfer_prediction_error_percent": (
-                        signed_percent_error(
-                            post_predicted_seconds, duration_summary.median
-                        )
-                    ),
-                    "post_seed_transfer_absolute_error_percent": (
-                        absolute_percent_error(
-                            post_predicted_seconds, duration_summary.median
-                        )
-                    ),
                 }
             )
-            line = (
-                f"[{index:02d}/{len(pairs):02d}] {source_id:16} -> {destination_id:16} "
-                f"rtt={rtt_summary.median:.1f}ms "
-                f"bw={bandwidth_summary.median:.1f}Mbps "
-                f"pred_err="
-                f"{edge_rows[-1]['median_transfer_prediction_error_percent']:.1f}%"
+            print(
+                f"[{index:02d}/{len(pairs):02d}] "
+                f"{source_id:16} -> {destination_id:16} "
+                f"fit=fixed:{fixed_seconds:.3f}s/"
+                f"{steady_bandwidth:.1f}Mbps "
+                f"heldout={duration_summary.median:.3f}s "
+                f"pred={predicted_seconds:.3f}s "
+                f"err={edge_rows[-1]['median_transfer_prediction_error_percent']:.1f}%"
             )
-            if args.seed_telemetry:
-                line += (
-                    " post_seed_err="
-                    f"{edge_rows[-1]['post_seed_transfer_prediction_error_percent']:.1f}%"
-                )
-            print(line)
     finally:
-        cleanup_code = "import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)"
+        cleanup_code = (
+            "import pathlib,shutil,sys; "
+            "shutil.rmtree(pathlib.Path(sys.argv[1]).parent, ignore_errors=True)"
+        )
         for node in cluster.nodes:
             try:
                 run_at_source(
@@ -474,9 +469,11 @@ print(json.dumps(values))
             "payload_bytes": args.payload_bytes,
             "timeout_seconds": args.timeout_seconds,
             "rsync_mode": "-az --delete over SSH",
+            "validation_mode": "two_point_affine_fit_then_held_out_transfer",
+            "held_out_payload_bytes": args.payload_bytes,
             "expected_carbon_metric": args.expected_carbon_metric,
             "expected_state_token": args.expected_state_token,
-            "seed_telemetry": args.seed_telemetry,
+            "seed_telemetry_ignored": args.seed_telemetry,
         },
         "initial_health": health,
     }
@@ -514,26 +511,17 @@ print(json.dumps(values))
         if row["median_transfer_absolute_error_percent"] is not None
     ]
     error_summary = summarize_samples(transfer_errors)
-    post_seed_errors = [
-        float(row["post_seed_transfer_absolute_error_percent"])
-        for row in edge_rows
-        if row["post_seed_transfer_absolute_error_percent"] is not None
-    ]
-    post_seed_error_summary = summarize_samples(post_seed_errors)
-    print("\nDIRECTED NETWORK MEASUREMENT PASSED")
+    print("\nDIRECTED NETWORK HELD-OUT MEASUREMENT PASSED")
     print(f"bundle: {bundle}")
     print(f"directed_edges: {len(edge_rows)}")
-    print(f"median_abs_transfer_prediction_error_pct: {error_summary.median:.2f}")
-    print(f"p95_abs_transfer_prediction_error_pct: {error_summary.p95:.2f}")
-    if args.seed_telemetry:
-        print(
-            "post_seed_median_abs_transfer_prediction_error_pct: "
-            f"{post_seed_error_summary.median:.2f}"
-        )
-        print(
-            "post_seed_p95_abs_transfer_prediction_error_pct: "
-            f"{post_seed_error_summary.p95:.2f}"
-        )
+    print(
+        "heldout_median_abs_transfer_prediction_error_pct: "
+        f"{error_summary.median:.2f}"
+    )
+    print(
+        "heldout_p95_abs_transfer_prediction_error_pct: "
+        f"{error_summary.p95:.2f}"
+    )
     return 0
 
 
