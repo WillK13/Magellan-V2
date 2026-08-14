@@ -328,6 +328,8 @@ class MigrationService:
             activated = False
             checkpoint_seconds = 0.0
             transfer_seconds = 0.0
+            transfer_setup_seconds = 0.0
+            transfer_wall_seconds = 0.0
             activation_seconds = 0.0
             restore_seconds = 0.0
 
@@ -386,6 +388,7 @@ class MigrationService:
                 )
 
                 checkpoint_started = time.monotonic()
+                pre_checkpoint_seconds = checkpoint_started - downtime_started
                 await asyncio.to_thread(
                     self._runtime.stop,
                     task_id,
@@ -396,7 +399,8 @@ class MigrationService:
                     self._checkpoint_manager.validate,
                     task_id,
                 )
-                checkpoint_seconds = time.monotonic() - checkpoint_started
+                checkpoint_finished = time.monotonic()
+                checkpoint_seconds = checkpoint_finished - checkpoint_started
 
                 print(
                     f"[checkpoint-valid] task={task_id} "
@@ -406,19 +410,37 @@ class MigrationService:
                 )
 
                 transfer_started = time.monotonic()
+                post_checkpoint_seconds = max(
+                    0.0, transfer_started - checkpoint_finished
+                )
                 transfer_result = await asyncio.to_thread(
                     self._transfer.send,
                     task_id,
                     destination_node_id,
                     migration_id,
                 )
+                transfer_finished = time.monotonic()
+                transfer_call_wall_seconds = max(
+                    0.0, transfer_finished - transfer_started
+                )
                 transfer_seconds = float(
                     getattr(
                         transfer_result,
                         "duration_seconds",
-                        time.monotonic() - transfer_started,
+                        transfer_call_wall_seconds,
                     )
                 )
+                transfer_setup_seconds = float(
+                    getattr(transfer_result, "setup_seconds", 0.0)
+                )
+                transfer_wall_seconds = float(
+                    getattr(
+                        transfer_result,
+                        "wall_seconds",
+                        transfer_call_wall_seconds,
+                    )
+                )
+                post_transfer_started = transfer_finished
                 observed_transfer_bytes = int(
                     getattr(
                         transfer_result,
@@ -474,10 +496,17 @@ class MigrationService:
                     migration_id, MigrationStatus.ACTIVATING
                 )
                 activation_started = time.monotonic()
+                post_transfer_seconds = max(
+                    0.0, activation_started - post_transfer_started
+                )
                 response = await self._client.activate(
                     activation_request
                 )
-                activation_seconds = time.monotonic() - activation_started
+                activation_finished = time.monotonic()
+                activation_seconds = activation_finished - activation_started
+                destination_activation_seconds = (
+                    response.activation_wall_seconds or 0.0
+                )
                 restore_seconds = response.restore_wall_seconds or 0.0
 
                 if not response.activated:
@@ -487,7 +516,30 @@ class MigrationService:
                     )
 
                 activated = True
-                total_downtime_seconds = time.monotonic() - downtime_started
+                total_downtime_seconds = (
+                    activation_finished - downtime_started
+                )
+                activation_non_restore_seconds = max(
+                    0.0, activation_seconds - restore_seconds
+                )
+                migration_overhead_seconds = max(
+                    0.0,
+                    total_downtime_seconds
+                    - checkpoint_seconds
+                    - transfer_seconds
+                    - restore_seconds,
+                )
+                instrumented_wall_seconds = (
+                    pre_checkpoint_seconds
+                    + checkpoint_seconds
+                    + post_checkpoint_seconds
+                    + transfer_call_wall_seconds
+                    + post_transfer_seconds
+                    + activation_seconds
+                )
+                timing_residual_seconds = max(
+                    0.0, total_downtime_seconds - instrumented_wall_seconds
+                )
                 if self._telemetry_store is not None:
                     self._telemetry_store.record_migration_calibration(
                         source_node_id=self._local_node.id,
@@ -520,10 +572,32 @@ class MigrationService:
                                 missing_artifact_bytes
                                 + checkpoint_summary.size_bytes
                             ),
+                            "pre_checkpoint_seconds": pre_checkpoint_seconds,
                             "checkpoint_seconds": checkpoint_seconds,
+                            "post_checkpoint_seconds": post_checkpoint_seconds,
+                            "transfer_setup_seconds": transfer_setup_seconds,
                             "transfer_seconds": transfer_seconds,
+                            "transfer_wall_seconds": transfer_wall_seconds,
+                            "transfer_call_wall_seconds": transfer_call_wall_seconds,
+                            "post_transfer_seconds": post_transfer_seconds,
                             "restore_seconds": restore_seconds,
                             "activation_seconds": activation_seconds,
+                            "destination_activation_seconds": (
+                                destination_activation_seconds
+                            ),
+                            "activation_transport_seconds": max(
+                                0.0,
+                                activation_seconds
+                                - destination_activation_seconds,
+                            ),
+                            "activation_non_restore_seconds": (
+                                activation_non_restore_seconds
+                            ),
+                            "migration_overhead_seconds": (
+                                migration_overhead_seconds
+                            ),
+                            "instrumented_wall_seconds": instrumented_wall_seconds,
+                            "timing_residual_seconds": timing_residual_seconds,
                             "total_downtime_seconds": total_downtime_seconds,
                         },
                     )

@@ -8,7 +8,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from magellan.config.loader import load_cluster_config
@@ -38,6 +38,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument("--measurements-root", default="experiments/measurements")
     parser.add_argument("--measurement-id", default=None)
+    parser.add_argument(
+        "--seed-telemetry",
+        action="store_true",
+        help=(
+            "Record the measured RTT/transfer samples into each source daemon's "
+            "edge telemetry after collecting the cold prediction."
+        ),
+    )
     parser.add_argument("--expected-carbon-metric", default="lifecycle")
     parser.add_argument(
         "--expected-state-token",
@@ -47,8 +55,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def request_json(url: str, timeout: float = 8.0) -> Any:
-    with urlopen(url, timeout=timeout) as response:
+def request_json(
+    url: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: float = 8.0,
+) -> Any:
+    body = None
+    headers: dict[str, str] = {}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(url, data=body, headers=headers, method=method)
+    with urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -315,6 +334,32 @@ print(json.dumps(values))
             rtt_summary = summarize_samples(rtt_values)
             bandwidth_summary = summarize_samples(measured_bandwidths)
             duration_summary = summarize_samples(transfer_values)
+
+            post_telemetry = telemetry
+            post_predicted_seconds = predicted_seconds
+            if args.seed_telemetry:
+                for rtt_ms in rtt_values:
+                    post_telemetry = request_json(
+                        f"{source_api}/telemetry/edges/{destination_id}/sample",
+                        method="POST",
+                        payload={"latency_ms": rtt_ms},
+                    )
+                for duration in transfer_values:
+                    post_telemetry = request_json(
+                        f"{source_api}/telemetry/edges/{destination_id}/sample",
+                        method="POST",
+                        payload={
+                            "transfer_bytes": args.payload_bytes,
+                            "transfer_duration_seconds": float(duration),
+                        },
+                    )
+                post_predicted_seconds = predict_transfer_seconds(
+                    size_bytes=args.payload_bytes,
+                    bandwidth_mbps=float(
+                        post_telemetry["effective_bandwidth_mbps"]
+                    ),
+                    latency_ms=float(post_telemetry["effective_latency_ms"]),
+                )
             edge_rows.append(
                 {
                     "source_node_id": source_id,
@@ -341,14 +386,44 @@ print(json.dumps(values))
                     "median_transfer_absolute_error_percent": absolute_percent_error(
                         predicted_seconds, duration_summary.median
                     ),
+                    "post_seed_bandwidth_mbps": post_telemetry.get(
+                        "effective_bandwidth_mbps"
+                    ),
+                    "post_seed_bandwidth_source": post_telemetry.get(
+                        "bandwidth_source"
+                    ),
+                    "post_seed_latency_ms": post_telemetry.get(
+                        "effective_latency_ms"
+                    ),
+                    "post_seed_latency_source": post_telemetry.get(
+                        "latency_source"
+                    ),
+                    "post_seed_predicted_transfer_seconds": post_predicted_seconds,
+                    "post_seed_transfer_prediction_error_percent": (
+                        signed_percent_error(
+                            post_predicted_seconds, duration_summary.median
+                        )
+                    ),
+                    "post_seed_transfer_absolute_error_percent": (
+                        absolute_percent_error(
+                            post_predicted_seconds, duration_summary.median
+                        )
+                    ),
                 }
             )
-            print(
+            line = (
                 f"[{index:02d}/42] {source_id:16} -> {destination_id:16} "
                 f"rtt={rtt_summary.median:.1f}ms "
                 f"bw={bandwidth_summary.median:.1f}Mbps "
-                f"pred_err={edge_rows[-1]['median_transfer_prediction_error_percent']:.1f}%"
+                f"pred_err="
+                f"{edge_rows[-1]['median_transfer_prediction_error_percent']:.1f}%"
             )
+            if args.seed_telemetry:
+                line += (
+                    " post_seed_err="
+                    f"{edge_rows[-1]['post_seed_transfer_prediction_error_percent']:.1f}%"
+                )
+            print(line)
     finally:
         cleanup_code = "import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)"
         for node in cluster.nodes:
@@ -389,6 +464,7 @@ print(json.dumps(values))
             "rsync_mode": "-az --delete over SSH",
             "expected_carbon_metric": args.expected_carbon_metric,
             "expected_state_token": args.expected_state_token,
+            "seed_telemetry": args.seed_telemetry,
         },
         "initial_health": health,
     }
@@ -426,11 +502,26 @@ print(json.dumps(values))
         if row["median_transfer_absolute_error_percent"] is not None
     ]
     error_summary = summarize_samples(transfer_errors)
+    post_seed_errors = [
+        float(row["post_seed_transfer_absolute_error_percent"])
+        for row in edge_rows
+        if row["post_seed_transfer_absolute_error_percent"] is not None
+    ]
+    post_seed_error_summary = summarize_samples(post_seed_errors)
     print("\nSEVEN-NODE NETWORK MEASUREMENT PASSED")
     print(f"bundle: {bundle}")
     print(f"directed_edges: {len(edge_rows)}")
     print(f"median_abs_transfer_prediction_error_pct: {error_summary.median:.2f}")
     print(f"p95_abs_transfer_prediction_error_pct: {error_summary.p95:.2f}")
+    if args.seed_telemetry:
+        print(
+            "post_seed_median_abs_transfer_prediction_error_pct: "
+            f"{post_seed_error_summary.median:.2f}"
+        )
+        print(
+            "post_seed_p95_abs_transfer_prediction_error_pct: "
+            f"{post_seed_error_summary.p95:.2f}"
+        )
     return 0
 
 

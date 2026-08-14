@@ -32,3 +32,11 @@ Magellan later relies on: directed WAN RTT/bandwidth and controlled migration ti
 Use `scripts/set_seven_node_service_mode.py measure` before collecting them so all
 seven daemons run against isolated `runtime-state-gcp-measurement` state with
 life-cycle carbon accounting.
+
+### Stage 3A.1 calibration
+
+Use `scripts/measure_seven_node_network.py --seed-telemetry` in isolated
+measurement mode to preserve cold edge predictions, inject measured RTT/transfer
+samples into each source daemon, and record post-seed prediction error in the same
+bundle. Controlled migration bundles also include transfer setup/wall timing and
+the calibrated migration-overhead term.

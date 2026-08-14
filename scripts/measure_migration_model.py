@@ -482,14 +482,35 @@ def main() -> int:
                 predicted_checkpoint = float(predicted.get("checkpoint_seconds", 0.0))
                 predicted_transfer = float(predicted.get("transfer_seconds", 0.0))
                 predicted_restore = float(predicted.get("restore_seconds", 0.0))
-                predicted_downtime = (
-                    predicted_checkpoint + predicted_transfer + predicted_restore
+                predicted_overhead = float(
+                    predicted.get("migration_overhead_seconds", 0.0)
+                )
+                predicted_downtime = float(
+                    predicted.get(
+                        "predicted_downtime_seconds",
+                        predicted_checkpoint
+                        + predicted_transfer
+                        + predicted_restore
+                        + predicted_overhead,
+                    )
                 )
                 actual_checkpoint = float(actual["checkpoint_seconds"])
                 actual_transfer = float(actual["transfer_seconds"])
                 actual_restore = float(actual["restore_seconds"])
                 actual_activation = float(actual["activation_seconds"])
                 actual_downtime = float(actual["total_downtime_seconds"])
+                actual_overhead = float(
+                    actual.get(
+                        "migration_overhead_seconds",
+                        max(
+                            0.0,
+                            actual_downtime
+                            - actual_checkpoint
+                            - actual_transfer
+                            - actual_restore,
+                        ),
+                    )
+                )
 
                 row = {
                     "measurement_id": measurement_id,
@@ -528,6 +549,33 @@ def main() -> int:
                         if edge_calibration is not None
                         else None
                     ),
+                    "calibration_overhead_seconds_before": (
+                        max(
+                            0.0,
+                            float(
+                                edge_calibration.get(
+                                    "total_downtime_seconds_ema"
+                                )
+                                or 0.0
+                            )
+                            - float(
+                                edge_calibration.get(
+                                    "checkpoint_seconds_ema"
+                                )
+                                or 0.0
+                            )
+                            - float(
+                                edge_calibration.get("transfer_seconds_ema")
+                                or 0.0
+                            )
+                            - float(
+                                edge_calibration.get("restore_seconds_ema")
+                                or 0.0
+                            ),
+                        )
+                        if edge_calibration is not None
+                        else None
+                    ),
                     "candidate_calibration_source": predicted.get("calibration_source"),
                     "candidate_bandwidth_source": predicted.get("bandwidth_source"),
                     "candidate_latency_source": predicted.get("latency_source"),
@@ -561,8 +609,43 @@ def main() -> int:
                     "restore_absolute_error_percent": absolute_percent_error(
                         predicted_restore, actual_restore
                     ),
+                    "predicted_migration_overhead_seconds": predicted_overhead,
+                    "actual_migration_overhead_seconds": actual_overhead,
                     "predicted_downtime_seconds": predicted_downtime,
+                    "actual_pre_checkpoint_seconds": actual.get(
+                        "pre_checkpoint_seconds"
+                    ),
+                    "actual_post_checkpoint_seconds": actual.get(
+                        "post_checkpoint_seconds"
+                    ),
+                    "actual_transfer_setup_seconds": actual.get(
+                        "transfer_setup_seconds"
+                    ),
+                    "actual_transfer_wall_seconds": actual.get(
+                        "transfer_wall_seconds"
+                    ),
+                    "actual_transfer_call_wall_seconds": actual.get(
+                        "transfer_call_wall_seconds"
+                    ),
+                    "actual_post_transfer_seconds": actual.get(
+                        "post_transfer_seconds"
+                    ),
                     "actual_activation_seconds": actual_activation,
+                    "actual_destination_activation_seconds": actual.get(
+                        "destination_activation_seconds"
+                    ),
+                    "actual_activation_transport_seconds": actual.get(
+                        "activation_transport_seconds"
+                    ),
+                    "actual_activation_non_restore_seconds": actual.get(
+                        "activation_non_restore_seconds"
+                    ),
+                    "actual_instrumented_wall_seconds": actual.get(
+                        "instrumented_wall_seconds"
+                    ),
+                    "actual_timing_residual_seconds": actual.get(
+                        "timing_residual_seconds"
+                    ),
                     "actual_downtime_seconds": actual_downtime,
                     "downtime_error_percent": signed_percent_error(
                         predicted_downtime, actual_downtime
@@ -591,6 +674,7 @@ def main() -> int:
                 print(
                     f"[measured] checkpoint={actual_checkpoint:.3f}s "
                     f"transfer={actual_transfer:.3f}s restore={actual_restore:.3f}s "
+                    f"overhead={actual_overhead:.3f}s "
                     f"downtime={actual_downtime:.3f}s "
                     f"pred_downtime={predicted_downtime:.3f}s"
                 )

@@ -25,6 +25,7 @@ class EdgeMetrics:
     latency_freshness: TelemetryFreshness = TelemetryFreshness.UNAVAILABLE
     checkpoint_seconds: float | None = None
     restore_seconds: float | None = None
+    migration_overhead_seconds: float = 0.0
     calibration_source: str = "configured_fallback"
 
 
@@ -98,6 +99,7 @@ class ClusterGraph:
         latency_freshness = TelemetryFreshness.UNAVAILABLE
         checkpoint_seconds = None
         restore_seconds = None
+        migration_overhead_seconds = 0.0
         calibration_source = "configured_fallback"
 
         if self._telemetry_store is not None and self._telemetry_policy is not None:
@@ -123,6 +125,19 @@ class ClusterGraph:
             if calibration.freshness == TelemetryFreshness.FRESH:
                 checkpoint_seconds = calibration.checkpoint_seconds_ema
                 restore_seconds = calibration.restore_seconds_ema
+                if (
+                    calibration.total_downtime_seconds_ema is not None
+                    and calibration.checkpoint_seconds_ema is not None
+                    and calibration.transfer_seconds_ema is not None
+                    and calibration.restore_seconds_ema is not None
+                ):
+                    migration_overhead_seconds = max(
+                        0.0,
+                        calibration.total_downtime_seconds_ema
+                        - calibration.checkpoint_seconds_ema
+                        - calibration.transfer_seconds_ema
+                        - calibration.restore_seconds_ema,
+                    )
                 calibration_source = "measured_migration_ema"
 
         distance_km = haversine_distance_km(
@@ -144,5 +159,6 @@ class ClusterGraph:
             latency_freshness=latency_freshness,
             checkpoint_seconds=checkpoint_seconds,
             restore_seconds=restore_seconds,
+            migration_overhead_seconds=migration_overhead_seconds,
             calibration_source=calibration_source,
         )

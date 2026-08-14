@@ -16,6 +16,7 @@ from magellan.bidding.models import (
 from magellan.daemon.context import build_daemon_context
 from magellan.policy.models import AdaptiveTaskPolicyState
 from magellan.telemetry.models import (
+    EdgeTelemetrySampleRequest,
     EdgeTelemetryView,
     MigrationCalibrationView,
     TaskTelemetryView,
@@ -538,6 +539,70 @@ async def edge_telemetry() -> list[EdgeTelemetryView]:
             )
         )
     return result
+
+
+@app.post(
+    "/telemetry/edges/{destination_node_id}/sample",
+    response_model=EdgeTelemetryView,
+)
+async def record_edge_telemetry_sample(
+    destination_node_id: str,
+    sample: EdgeTelemetrySampleRequest,
+) -> EdgeTelemetryView:
+    """Record an operator-measured edge sample for experiment preflight."""
+    try:
+        context.cluster.get_node(destination_node_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if destination_node_id == context.local_node.id:
+        raise HTTPException(
+            status_code=400, detail="Destination must be a peer"
+        )
+    if sample.latency_ms is None and sample.transfer_bytes is None:
+        raise HTTPException(
+            status_code=400, detail="At least one sample is required"
+        )
+    if (sample.transfer_bytes is None) != (
+        sample.transfer_duration_seconds is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="transfer_bytes and transfer_duration_seconds must be provided together",
+        )
+
+    if sample.latency_ms is not None:
+        context.telemetry_store.record_latency(
+            context.local_node.id, destination_node_id, sample.latency_ms
+        )
+    if (
+        sample.transfer_bytes is not None
+        and sample.transfer_duration_seconds is not None
+    ):
+        context.telemetry_store.record_transfer(
+            context.local_node.id,
+            destination_node_id,
+            sample.transfer_bytes,
+            sample.transfer_duration_seconds,
+        )
+
+    configured = context.cluster.get_edge_override(
+        context.local_node.id, destination_node_id
+    )
+    return context.telemetry_store.edge_view(
+        context.local_node.id,
+        destination_node_id,
+        (
+            configured.bandwidth_mbps
+            if configured
+            else context.cluster.default_bandwidth_mbps
+        ),
+        (
+            configured.latency_ms
+            if configured
+            else context.cluster.default_latency_ms
+        ),
+        context.policy.telemetry.edge_stale_after_seconds,
+    )
 
 
 @app.get(

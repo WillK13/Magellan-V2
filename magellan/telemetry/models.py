@@ -55,6 +55,14 @@ class TaskTelemetryView(TaskTelemetryRecord):
     effective_power_source: str
 
 
+class EdgeTelemetrySampleRequest(BaseModel):
+    """Operator-supplied real edge measurement for experiment preflight."""
+
+    latency_ms: float | None = Field(default=None, ge=0)
+    transfer_bytes: int | None = Field(default=None, gt=0)
+    transfer_duration_seconds: float | None = Field(default=None, gt=0)
+
+
 class EdgeTelemetryRecord(BaseModel):
     source_node_id: str = Field(min_length=1)
     destination_node_id: str = Field(min_length=1)

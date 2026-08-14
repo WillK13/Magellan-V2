@@ -14,6 +14,8 @@ from magellan.state.persistent_registry import PersistentTaskRegistry
 class CheckpointTransferResult:
     transfer_bytes: int
     duration_seconds: float
+    setup_seconds: float = 0.0
+    wall_seconds: float | None = None
 
     @property
     def bandwidth_mbps(self) -> float | None:
@@ -74,10 +76,13 @@ class RsyncCheckpointTransfer:
         ]
         mkdir_command = f"mkdir -p {shlex.quote(str(remote_checkpoint))}"
 
+        wall_started = time.perf_counter()
+        setup_started = wall_started
         subprocess.run(
             ["ssh", *ssh_options, target, mkdir_command],
             check=True,
         )
+        setup_seconds = max(0.0, time.perf_counter() - setup_started)
 
         started = time.perf_counter()
         subprocess.run(
@@ -93,15 +98,19 @@ class RsyncCheckpointTransfer:
             check=True,
         )
         duration = max(1e-9, time.perf_counter() - started)
+        wall_seconds = max(1e-9, time.perf_counter() - wall_started)
 
         result = CheckpointTransferResult(
             transfer_bytes=transfer_bytes,
             duration_seconds=duration,
+            setup_seconds=setup_seconds,
+            wall_seconds=wall_seconds,
         )
         print(
             f"[checkpoint-transfer] task={task_id} "
             f"destination={destination_node_id} migration={migration_id} "
             f"bytes={transfer_bytes} duration={duration:.6f}s "
+            f"setup={setup_seconds:.6f}s wall={wall_seconds:.6f}s "
             f"bandwidth_mbps={result.bandwidth_mbps or 0.0:.3f}",
             flush=True,
         )

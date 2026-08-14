@@ -72,8 +72,14 @@ def estimate_migrate(
         else pause_policy.resume_seconds
     )
 
+    migration_overhead_seconds = max(0.0, edge.migration_overhead_seconds)
+
     restore_start = at_utc + pd.Timedelta(
-        seconds=checkpoint_seconds + transfer_duration_seconds
+        seconds=(
+            checkpoint_seconds
+            + transfer_duration_seconds
+            + migration_overhead_seconds
+        )
     )
     arrival_time = restore_start + pd.Timedelta(seconds=restore_seconds)
 
@@ -150,6 +156,7 @@ def estimate_migrate(
         checkpoint_seconds
         + transfer_duration_seconds
         + restore_seconds
+        + migration_overhead_seconds
         + compute_seconds
     )
 
@@ -173,6 +180,13 @@ def estimate_migrate(
             "latency_source": edge.latency_source,
             "checkpoint_seconds": checkpoint_seconds,
             "restore_seconds": restore_seconds,
+            "migration_overhead_seconds": migration_overhead_seconds,
+            "predicted_downtime_seconds": (
+                checkpoint_seconds
+                + transfer_duration_seconds
+                + restore_seconds
+                + migration_overhead_seconds
+            ),
             "calibration_source": edge.calibration_source,
             "checkpoint_bytes": task.checkpoint_bytes,
             "static_data_bytes": static_data_bytes,
