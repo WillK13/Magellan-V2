@@ -18,7 +18,6 @@ from magellan.state.task_models import (
 
 
 _CAPACITY_STATUSES = {
-    TaskStatus.STOPPED,
     TaskStatus.RUNNING,
     TaskStatus.PAUSED,
     TaskStatus.MIGRATING,
