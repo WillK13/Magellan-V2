@@ -104,17 +104,17 @@ class TelemetryPolicy(BaseModel):
     enabled: bool = True
     task_scan_interval_seconds: float = Field(default=1.0, gt=0)
     edge_probe_interval_seconds: float = Field(default=15.0, gt=0)
-    edge_bandwidth_probe_interval_seconds: float = Field(default=600.0, gt=0)
+    edge_bandwidth_probe_interval_seconds: float = Field(default=1800.0, gt=0)
     edge_bandwidth_probe_bytes: int = Field(default=1_048_576, ge=65_536)
     edge_bandwidth_probe_max_bytes: int = Field(
-        default=8 * 1024 * 1024,
+        default=32 * 1024 * 1024,
         ge=65_536,
     )
     edge_bandwidth_probe_target_seconds: float = Field(default=3.0, gt=0)
     edge_bandwidth_probe_timeout_seconds: float = Field(default=45.0, gt=0)
-    refresh_edges_before_decision: bool = True
+    refresh_edges_before_decision: bool = False
     task_stale_after_seconds: float = Field(default=10.0, gt=0)
-    edge_stale_after_seconds: float = Field(default=120.0, gt=0)
+    edge_stale_after_seconds: float = Field(default=3600.0, gt=0)
     calibration_stale_after_seconds: float = Field(default=3600.0, gt=0)
     ema_alpha: float = Field(default=0.35, gt=0, le=1)
     power_idle_fraction: float = Field(default=0.2, ge=0, le=1)
@@ -126,7 +126,7 @@ class TelemetryPolicy(BaseModel):
         if self.edge_bandwidth_probe_max_bytes <= self.edge_bandwidth_probe_bytes:
             raise ValueError(
                 "edge_bandwidth_probe_max_bytes must be > "
-                "edge_bandwidth_probe_bytes for two-point calibration"
+                "edge_bandwidth_probe_bytes"
             )
         return self
 

@@ -89,3 +89,12 @@ all cold/fallback samples but reports headline accuracy only over samples that a
 used measured migration calibration and a live transfer model. `matrix_summary.json`
 and `matrix_cases.csv` are descriptive outputs; the validator checks completeness and
 checksums but intentionally does not turn an accuracy target into a pass/fail filter.
+
+### Lightweight cached WAN telemetry
+
+Stage 3A.5 keeps WAN measurement out of the normal scheduling critical path.
+Nodes calibrate outgoing links on startup/background intervals, cache the
+results, and reuse them in migration scoring. Calibration uses a small rsync
+sample for fixed startup cost plus a bounded sustained SSH stream for transport
+throughput; observed migrations continue refining the cached model. Explicit
+cluster refresh remains available for controlled experiment preflight.

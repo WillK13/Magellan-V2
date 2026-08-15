@@ -127,6 +127,40 @@ def test_two_point_transfer_model_persists_and_predicts_fixed_plus_rate(tmp_path
     assert view.last_transfer_model_large_bytes == 10_000_000
 
 
+def test_stream_transfer_model_uses_sustained_rate_and_small_rsync_startup(
+    tmp_path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    store = TelemetryStore(tmp_path, ema_alpha=0.5)
+    store.record_transfer_model_stream(
+        "boston",
+        "virginia",
+        small_bytes=1_000_000,
+        small_seconds=0.30,
+        stream_bytes=30_000_000,
+        stream_seconds=3.0,
+        sampled_at_utc=now,
+    )
+
+    view = store.edge_view(
+        "boston",
+        "virginia",
+        configured_bandwidth_mbps=100,
+        configured_latency_ms=50,
+        stale_after_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    # Sustained stream is 80 Mbps; 1 MB payload takes 0.1 s at that rate,
+    # leaving 0.2 s of fixed rsync/SSH transfer startup.
+    assert view.effective_transfer_steady_bandwidth_mbps == pytest.approx(80)
+    assert view.effective_transfer_fixed_seconds == pytest.approx(0.2)
+    assert view.effective_bandwidth_mbps == pytest.approx(80)
+    assert (
+        view.last_transfer_model_source
+        == "ssh_stream_plus_rsync_setup_probe"
+    )
+
+
 def test_real_migration_refines_affine_rate_without_relearning_fixed_cost(tmp_path) -> None:
     now = datetime.now(timezone.utc)
     store = TelemetryStore(tmp_path, ema_alpha=0.5)

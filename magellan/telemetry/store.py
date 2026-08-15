@@ -324,6 +324,78 @@ class TelemetryStore:
             self._persist()
             return record.model_copy(deep=True)
 
+    def record_transfer_model_stream(
+        self,
+        source_node_id: str,
+        destination_node_id: str,
+        small_bytes: int,
+        small_seconds: float,
+        stream_bytes: int,
+        stream_seconds: float,
+        sampled_at_utc: datetime | None = None,
+        *,
+        sample_source: str = "ssh_stream_plus_rsync_setup_probe",
+    ) -> EdgeTelemetryRecord:
+        """Record cached fixed startup plus sustained transport throughput.
+
+        The small rsync sample captures transfer startup, while the bounded SSH
+        stream measures sustained source-to-destination transport rate. This
+        avoids extrapolating a steady-state rate from two startup-dominated
+        small-file rsync samples.
+        """
+        if small_bytes <= 0 or small_seconds <= 0:
+            raise ValueError("Small rsync sample must be positive")
+        if stream_bytes <= 0 or stream_seconds <= 0:
+            raise ValueError("SSH stream sample must be positive")
+
+        steady_bandwidth_mbps = (
+            stream_bytes * 8.0 / stream_seconds / 1_000_000.0
+        )
+        small_payload_seconds = (
+            small_bytes * 8.0 / (steady_bandwidth_mbps * 1_000_000.0)
+        )
+        fixed_seconds = max(0.0, small_seconds - small_payload_seconds)
+        key = self.edge_key(source_node_id, destination_node_id)
+        sampled_at = _utc(sampled_at_utc)
+
+        with self._lock:
+            record = self._document.edge_records.get(key) or EdgeTelemetryRecord(
+                source_node_id=source_node_id,
+                destination_node_id=destination_node_id,
+            )
+            record.bandwidth_mbps_ema = _ema(
+                record.bandwidth_mbps_ema,
+                steady_bandwidth_mbps,
+                self._ema_alpha,
+            )
+            record.bandwidth_sample_count += 2
+            record.last_bandwidth_sample_source = sample_source
+            record.last_bandwidth_sample_at_utc = sampled_at
+
+            record.transfer_fixed_seconds_ema = _ema(
+                record.transfer_fixed_seconds_ema,
+                fixed_seconds,
+                self._ema_alpha,
+            )
+            record.transfer_steady_bandwidth_mbps_ema = _ema(
+                record.transfer_steady_bandwidth_mbps_ema,
+                steady_bandwidth_mbps,
+                self._ema_alpha,
+            )
+            record.transfer_model_sample_count += 1
+            record.last_transfer_model_source = sample_source
+            record.last_transfer_model_small_bytes = small_bytes
+            record.last_transfer_model_small_seconds = small_seconds
+            record.last_transfer_model_large_bytes = stream_bytes
+            record.last_transfer_model_large_seconds = stream_seconds
+            record.last_transfer_model_sample_at_utc = sampled_at
+            record.last_success_at_utc = sampled_at
+            record.consecutive_failures = 0
+            record.last_error = None
+            self._document.edge_records[key] = record
+            self._persist()
+            return record.model_copy(deep=True)
+
     def record_edge_failure(
         self,
         source_node_id: str,

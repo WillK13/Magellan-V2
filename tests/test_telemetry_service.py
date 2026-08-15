@@ -189,7 +189,7 @@ async def test_edge_refresh_is_topology_driven_and_lazy(tmp_path, monkeypatch) -
     assert views["california"].bandwidth_source == "measured_migration_transport_ema"
 
 
-def test_adaptive_rsync_probe_grows_fast_edge_payload_within_bound(
+def test_cached_transport_probe_combines_small_rsync_and_bounded_stream(
     tmp_path, monkeypatch
 ) -> None:
     boston = node()
@@ -199,7 +199,7 @@ def test_adaptive_rsync_probe_grows_fast_edge_payload_within_bound(
         cluster=ClusterConfig(nodes=[boston, virginia]),
         policy=TelemetryPolicy(
             edge_bandwidth_probe_bytes=1_048_576,
-            edge_bandwidth_probe_max_bytes=8_388_608,
+            edge_bandwidth_probe_max_bytes=32 * 1024 * 1024,
             edge_bandwidth_probe_target_seconds=3.0,
         ),
         registry=registry(tmp_path),
@@ -207,47 +207,32 @@ def test_adaptive_rsync_probe_grows_fast_edge_payload_within_bound(
         process_sampler=SequenceSampler([]),
     )
 
-    calls: list[int] = []
+    rsync_calls: list[tuple[str, int]] = []
+    stream_calls: list[str] = []
 
-    def fake_probe(_destination_node_id: str, size_bytes: int):
-        calls.append(size_bytes)
-        return size_bytes, 0.25 if len(calls) == 1 else 2.5
+    def fake_rsync(destination_node_id: str, size_bytes: int):
+        rsync_calls.append((destination_node_id, size_bytes))
+        return size_bytes, 0.35
 
-    monkeypatch.setattr(service, "_run_rsync_bandwidth_probe", fake_probe)
+    def fake_stream(destination_node_id: str):
+        stream_calls.append(destination_node_id)
+        return 12_000_000, 3.0
 
-    small, large = service._measure_migration_transport_model("virginia")
+    monkeypatch.setattr(service, "_run_rsync_bandwidth_probe", fake_rsync)
+    monkeypatch.setattr(service, "_run_ssh_stream_bandwidth_probe", fake_stream)
 
-    assert calls == [1_048_576, 8_388_608]
-    assert small == (1_048_576, pytest.approx(0.25))
-    assert large == (8_388_608, pytest.approx(2.5))
+    small, stream = service._measure_migration_transport_model("virginia")
+
+    assert rsync_calls == [("virginia", 1_048_576)]
+    assert stream_calls == ["virginia"]
+    assert small == (1_048_576, pytest.approx(0.35))
+    assert stream == (12_000_000, pytest.approx(3.0))
 
 
-def test_adaptive_rsync_probe_uses_second_size_on_slow_edge(tmp_path, monkeypatch) -> None:
-    boston = node()
-    virginia = peer_node("virginia", "10.0.0.2")
-    service = TelemetryService(
-        local_node=boston,
-        cluster=ClusterConfig(nodes=[boston, virginia]),
-        policy=TelemetryPolicy(
-            edge_bandwidth_probe_bytes=1_048_576,
-            edge_bandwidth_probe_max_bytes=8_388_608,
-            edge_bandwidth_probe_target_seconds=3.0,
-        ),
-        registry=registry(tmp_path),
-        store=TelemetryStore(tmp_path),
-        process_sampler=SequenceSampler([]),
+def test_telemetry_defaults_reuse_cached_edges_between_background_refreshes() -> None:
+    policy = TelemetryPolicy()
+    assert policy.refresh_edges_before_decision is False
+    assert (
+        policy.edge_stale_after_seconds
+        >= policy.edge_bandwidth_probe_interval_seconds
     )
-
-    calls: list[int] = []
-
-    def fake_probe(_destination_node_id: str, size_bytes: int):
-        calls.append(size_bytes)
-        return size_bytes, 3.2 if len(calls) == 1 else 6.1
-
-    monkeypatch.setattr(service, "_run_rsync_bandwidth_probe", fake_probe)
-
-    small, large = service._measure_migration_transport_model("virginia")
-
-    assert calls == [1_048_576, 2_097_152]
-    assert small == (1_048_576, pytest.approx(3.2))
-    assert large == (2_097_152, pytest.approx(6.1))

@@ -314,30 +314,102 @@ class TelemetryService:
             )
         return size_bytes, duration
 
+    def _run_ssh_stream_bandwidth_probe(
+        self, destination_node_id: str
+    ) -> tuple[int, float]:
+        """Measure sustained source-to-peer SSH throughput for a bounded time.
+
+        The remote command emits a readiness marker before the timer starts, so
+        connection setup is excluded from the steady-state rate. A separate
+        small rsync probe captures the fixed rsync/SSH transfer startup cost.
+        """
+        destination = self._cluster.get_node(destination_node_id)
+        target = f"{self._ssh_user}@{destination.internal_ip}"
+        connect_timeout = max(1, int(self._cluster.request_timeout_seconds))
+        ssh_options = [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"ConnectTimeout={connect_timeout}",
+        ]
+        timeout = self._policy.edge_bandwidth_probe_timeout_seconds
+        target_seconds = self._policy.edge_bandwidth_probe_target_seconds
+        max_bytes = self._policy.edge_bandwidth_probe_max_bytes
+
+        process = subprocess.Popen(
+            [
+                "ssh",
+                *ssh_options,
+                target,
+                "printf 'READY\\n'; cat >/dev/null",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        if process.stdout is None or process.stdin is None:
+            process.kill()
+            raise RuntimeError("Unable to open SSH probe pipes")
+
+        ready = process.stdout.readline().strip()
+        if ready != b"READY":
+            stderr = b"" if process.stderr is None else process.stderr.read()
+            process.kill()
+            raise RuntimeError(
+                "SSH stream probe did not become ready: "
+                + stderr.decode(errors="replace").strip()
+            )
+
+        chunk = os.urandom(64 * 1024)
+        sent = 0
+        started = time.perf_counter()
+        try:
+            while sent < max_bytes:
+                elapsed = time.perf_counter() - started
+                if elapsed >= target_seconds:
+                    break
+                remaining = max_bytes - sent
+                payload = chunk if remaining >= len(chunk) else chunk[:remaining]
+                process.stdin.write(payload)
+                sent += len(payload)
+        except BrokenPipeError as exc:
+            raise RuntimeError("SSH stream probe closed early") from exc
+        finally:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+
+        duration = max(1e-9, time.perf_counter() - started)
+        try:
+            return_code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        if return_code != 0:
+            stderr = b"" if process.stderr is None else process.stderr.read()
+            raise RuntimeError(
+                "SSH stream probe failed: "
+                + stderr.decode(errors="replace").strip()
+            )
+        if sent <= 0:
+            raise RuntimeError("SSH stream probe transferred no bytes")
+        return sent, duration
+
     def _measure_migration_transport_model(
         self, destination_node_id: str
     ) -> tuple[tuple[int, float], tuple[int, float]]:
-        """Collect two bounded rsync samples for an affine transfer model."""
-        initial = self._policy.edge_bandwidth_probe_bytes
-        maximum = self._policy.edge_bandwidth_probe_max_bytes
-        target = self._policy.edge_bandwidth_probe_target_seconds
-
-        small = self._run_rsync_bandwidth_probe(destination_node_id, initial)
-        _, small_duration = small
-
-        # Keep calibration sizes distinct from the 4 MiB held-out validation
-        # point: slow edges use a modest 2x follow-up, while fast edges use the
-        # configured maximum to expose steady-state throughput.
-        if small_duration >= target * 0.75:
-            follow_up = min(maximum, initial * 2)
-        else:
-            follow_up = maximum
-        if follow_up <= initial:
-            raise RuntimeError(
-                "edge_bandwidth_probe_max_bytes must exceed the initial probe size"
-            )
-        large = self._run_rsync_bandwidth_probe(destination_node_id, follow_up)
-        return small, large
+        """Measure fixed rsync startup plus sustained SSH transport rate."""
+        small = self._run_rsync_bandwidth_probe(
+            destination_node_id,
+            self._policy.edge_bandwidth_probe_bytes,
+        )
+        stream = self._run_ssh_stream_bandwidth_probe(destination_node_id)
+        return small, stream
 
     async def probe_edge(
         self,
@@ -348,9 +420,9 @@ class TelemetryService:
         """Refresh one directed edge using live peer measurements.
 
         The peer set comes from current cluster membership. RTT is measured
-        over HTTP, while migration transport uses two rsync/SSH payload sizes
-        to fit fixed transport cost plus steady-state throughput. This is the
-        same timed transfer component used by checkpoint migration.
+        over HTTP. Migration transport combines a small rsync sample for fixed
+        startup cost with a bounded sustained SSH stream for throughput. The
+        resulting model is cached and periodically refreshed in the background.
         """
         if destination_node_id == self._local_node.id:
             raise ValueError("Destination must be a peer")
@@ -390,18 +462,18 @@ class TelemetryService:
                     destination_node_id, force=force_bandwidth
                 ):
                     try:
-                        small, large = await asyncio.to_thread(
+                        small, stream = await asyncio.to_thread(
                             self._measure_migration_transport_model,
                             destination_node_id,
                         )
-                        self._store.record_transfer_model_pair(
+                        self._store.record_transfer_model_stream(
                             self._local_node.id,
                             destination_node_id,
                             small[0],
                             small[1],
-                            large[0],
-                            large[1],
-                            sample_source="rsync_two_point_probe",
+                            stream[0],
+                            stream[1],
+                            sample_source="ssh_stream_plus_rsync_setup_probe",
                         )
                         self._last_bandwidth_probe_monotonic[
                             destination_node_id
@@ -418,7 +490,12 @@ class TelemetryService:
     async def ensure_edges_fresh(
         self, destination_node_ids: set[str] | list[str] | tuple[str, ...]
     ) -> dict[str, object]:
-        """Refresh stale/unseen candidate edges before a scheduling decision."""
+        """Explicitly refresh stale/unseen edges when an operator requests it.
+
+        Normal scheduling reuses cached background telemetry; this method is
+        retained for experiment preflight and deployments that explicitly opt
+        into synchronous decision-time refresh.
+        """
         unique = tuple(dict.fromkeys(destination_node_ids))
         stale: list[str] = []
         for destination_node_id in unique:
