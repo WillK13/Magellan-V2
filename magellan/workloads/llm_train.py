@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import torch
 from torch.optim import AdamW
@@ -39,6 +40,25 @@ def atomic_json_write(
     )
 
     os.replace(temporary, path)
+
+
+def append_jsonl(
+    path: Path | None,
+    payload: dict,
+) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def directory_size_bytes(directory: Path) -> int:
+    return sum(
+        path.stat().st_size
+        for path in directory.rglob("*")
+        if path.is_file() and not path.name.endswith(".tmp")
+    )
 
 
 def atomic_torch_save(
@@ -100,6 +120,8 @@ def local_model_exists(
 def build_manifest(
     checkpoint_directory: Path,
     completed_steps: int,
+    checkpoint_id: str,
+    checkpoint_reason: str,
 ) -> dict:
     files: list[dict] = []
 
@@ -126,6 +148,8 @@ def build_manifest(
         "format_version": 1,
         "workload_type": "causal-lm-training",
         "completed_steps": completed_steps,
+        "checkpoint_id": checkpoint_id,
+        "checkpoint_reason": checkpoint_reason,
         "files": files,
     }
 
@@ -137,7 +161,12 @@ def save_checkpoint(
     optimizer: AdamW,
     completed_steps: int,
     loss_value: float | None,
-) -> None:
+    *,
+    reason: str,
+    metrics_file: Path | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    checkpoint_id = uuid4().hex
     checkpoint_directory.mkdir(
         parents=True,
         exist_ok=True,
@@ -152,6 +181,7 @@ def save_checkpoint(
 
     training_state = {
         "completed_steps": completed_steps,
+        "checkpoint_id": checkpoint_id,
         "optimizer_state_dict": optimizer.state_dict(),
         "torch_rng_state": torch.get_rng_state(),
     }
@@ -165,6 +195,8 @@ def save_checkpoint(
         checkpoint_directory / "meta.json",
         {
             "completed_steps": completed_steps,
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_reason": reason,
             "loss": loss_value,
             "node_id": os.getenv(
                 "MAGELLAN_NODE_ID",
@@ -181,15 +213,35 @@ def save_checkpoint(
         build_manifest(
             checkpoint_directory,
             completed_steps,
+            checkpoint_id,
+            reason,
         ),
     )
 
+    duration_seconds = time.monotonic() - started
+    size_bytes = directory_size_bytes(checkpoint_directory)
+    event = {
+        "format_version": 1,
+        "checkpoint_id": checkpoint_id,
+        "reason": reason,
+        "completed_steps": completed_steps,
+        "loss": loss_value,
+        "duration_seconds": duration_seconds,
+        "size_bytes": size_bytes,
+        "node_id": os.getenv("MAGELLAN_NODE_ID", "unknown"),
+        "task_id": os.getenv("MAGELLAN_TASK_ID", "unknown"),
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    append_jsonl(metrics_file, event)
+
     print(
-        f"[LLM] checkpoint completed_steps="
-        f"{completed_steps} "
+        f"[LLM] checkpoint completed_steps={completed_steps} "
+        f"reason={reason} id={checkpoint_id} "
+        f"seconds={duration_seconds:.6f} bytes={size_bytes} "
         f"directory={checkpoint_directory}",
         flush=True,
     )
+    return event
 
 
 def interruptible_sleep(seconds: float) -> None:
@@ -257,6 +309,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
+        "--checkpoint-metrics-file",
+        default=None,
+    )
+    parser.add_argument(
         "--model",
         default="sshleifer/tiny-gpt2",
     )
@@ -269,6 +325,12 @@ def parse_args() -> argparse.Namespace:
         "--sleep-per-step",
         type=float,
         default=2.0,
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=1,
+        help="Periodic checkpoint interval in steps; 0 disables periodic saves.",
     )
     parser.add_argument(
         "--learning-rate",
@@ -315,6 +377,8 @@ def main() -> None:
         raise ValueError(
             "--completion-file and --output-dir must be supplied together"
         )
+    if args.checkpoint_every < 0:
+        raise ValueError("--checkpoint-every must be non-negative")
 
     completion_file = (
         Path(args.completion_file).resolve()
@@ -324,6 +388,11 @@ def main() -> None:
     output_directory = (
         Path(args.output_dir).resolve()
         if args.output_dir is not None
+        else None
+    )
+    checkpoint_metrics_file = (
+        Path(args.checkpoint_metrics_file).resolve()
+        if args.checkpoint_metrics_file is not None
         else None
     )
 
@@ -428,6 +497,20 @@ def main() -> None:
     )
 
     completed_steps = 0
+    optimizer_state_loaded = False
+    resumed_checkpoint_id: str | None = None
+    checkpoint_meta_path = checkpoint_directory / "meta.json"
+    if resumed and checkpoint_meta_path.is_file():
+        try:
+            checkpoint_meta = json.loads(
+                checkpoint_meta_path.read_text(encoding="utf-8")
+            )
+            raw_checkpoint_id = checkpoint_meta.get("checkpoint_id")
+            if isinstance(raw_checkpoint_id, str):
+                resumed_checkpoint_id = raw_checkpoint_id
+        except (OSError, json.JSONDecodeError):
+            resumed_checkpoint_id = None
+
     optimizer_path = (
         checkpoint_directory / "optimizer.pt"
     )
@@ -441,10 +524,21 @@ def main() -> None:
             saved_state.get("completed_steps", 0)
         )
 
+        saved_checkpoint_id = saved_state.get("checkpoint_id")
+        if (
+            resumed_checkpoint_id is not None
+            and saved_checkpoint_id is not None
+            and saved_checkpoint_id != resumed_checkpoint_id
+        ):
+            raise RuntimeError(
+                "Checkpoint model/meta and optimizer state IDs do not match"
+            )
+
         optimizer.load_state_dict(
             saved_state["optimizer_state_dict"]
         )
         optimizer_to_device(optimizer, device)
+        optimizer_state_loaded = True
 
         rng_state = saved_state.get(
             "torch_rng_state"
@@ -475,6 +569,8 @@ def main() -> None:
         optimizer=optimizer,
         completed_steps=completed_steps,
         loss_value=None,
+        reason="startup",
+        metrics_file=checkpoint_metrics_file,
     )
 
     atomic_json_write(
@@ -488,6 +584,8 @@ def main() -> None:
             "pid": os.getpid(),
             "device": str(device),
             "resumed": resumed,
+            "resumed_checkpoint_id": resumed_checkpoint_id,
+            "optimizer_state_loaded": optimizer_state_loaded,
             "completed_steps": completed_steps,
             "ready_at_unix": time.time(),
         },
@@ -535,14 +633,20 @@ def main() -> None:
             flush=True,
         )
 
-        save_checkpoint(
-            checkpoint_directory=checkpoint_directory,
-            model=model,
-            tokenizer=tokenizer,
-            optimizer=optimizer,
-            completed_steps=completed_steps,
-            loss_value=last_loss,
-        )
+        if (
+            args.checkpoint_every > 0
+            and completed_steps % args.checkpoint_every == 0
+        ):
+            save_checkpoint(
+                checkpoint_directory=checkpoint_directory,
+                model=model,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                completed_steps=completed_steps,
+                loss_value=last_loss,
+                reason="periodic",
+                metrics_file=checkpoint_metrics_file,
+            )
         write_progress(
             progress_file,
             completed_steps,
@@ -563,6 +667,8 @@ def main() -> None:
         optimizer=optimizer,
         completed_steps=completed_steps,
         loss_value=last_loss,
+        reason="shutdown" if stop_requested else "completion",
+        metrics_file=checkpoint_metrics_file,
     )
 
     write_progress(

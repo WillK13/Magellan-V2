@@ -98,3 +98,12 @@ results, and reuse them in migration scoring. Calibration uses a small rsync
 sample for fixed startup cost plus a bounded sustained SSH stream for transport
 throughput; observed migrations continue refining the cached model. Explicit
 cluster refresh remains available for controlled experiment preflight.
+
+### Stage 3B.1 real LLM checkpoint migration
+
+`measure_llm_migration.py` launches a genuine Hugging Face causal-LM training
+process and verifies that model weights, AdamW optimizer state, PyTorch RNG state,
+and training progress survive migration. Checkpoint IDs are matched across the
+source stop checkpoint and destination restore, and training must advance after
+resume. Use `validate_llm_migration_measurement.py` to validate the checksummed
+bundle.
