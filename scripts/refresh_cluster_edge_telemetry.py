@@ -18,7 +18,25 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--cluster", default="config/cluster.gcp.json")
-    parser.add_argument("--timeout-seconds", type=float, default=180.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=180.0,
+        help=(
+            "Per-edge HTTP timeout. Each request refreshes exactly one directed "
+            "edge, so this no longer needs to cover all peers on a source node."
+        ),
+    )
+    parser.add_argument(
+        "--source-workers",
+        type=int,
+        default=3,
+        help=(
+            "Maximum source daemons calibrated concurrently. Each source probes "
+            "its outgoing edges serially; bounding cross-cluster concurrency avoids "
+            "the preflight measuring probe-induced contention."
+        ),
+    )
     parser.add_argument(
         "--allow-fallback",
         action="store_true",
@@ -33,6 +51,37 @@ def post_json(url: str, timeout: float) -> Any:
         return json.load(response)
 
 
+def refresh_source_edges(
+    source: Any,
+    peers: list[Any],
+    api_port: int,
+    timeout: float,
+) -> dict[str, Any]:
+    """Refresh one source's directed edges with one bounded request per edge.
+
+    The daemon already serializes outgoing rsync probes. Issuing an endpoint per
+    edge prevents one HTTP request from needing to remain open for the entire
+    source-node sweep, which can exceed a reasonable client timeout on WANs.
+    """
+    edges: dict[str, Any] = {}
+    failures: dict[str, str] = {}
+    for destination in peers:
+        url = (
+            f"http://{source.internal_ip}:{api_port}/telemetry/edges/"
+            f"{destination.id}/refresh"
+        )
+        try:
+            edges[destination.id] = post_json(url, timeout)
+        except Exception as exc:
+            failures[destination.id] = f"{type(exc).__name__}: {exc}"
+    return {
+        "node_id": source.id,
+        "peer_count": len(peers),
+        "edges": edges,
+        "failures": failures,
+    }
+
+
 def main() -> int:
     args = parse_args()
     cluster = load_cluster_config(args.cluster)
@@ -44,19 +93,29 @@ def main() -> int:
     print("== Live cluster edge telemetry refresh ==")
     print(f"nodes={node_count} directed_edges={expected_edges}")
 
-    # Refresh source daemons in parallel. Each daemon serializes its own outgoing
-    # bandwidth probes, avoiding source-NIC self-contention while keeping the
-    # cluster-wide preflight short enough that early samples remain fresh.
+    if args.source_workers <= 0:
+        raise ValueError("--source-workers must be positive")
+
+    # Refresh a bounded number of source daemons concurrently. Within each source
+    # we issue one request per directed edge. This keeps the client timeout scoped
+    # to a single live calibration and avoids seven sources saturating each other's
+    # destinations during the experiment preflight.
     results: dict[str, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=min(node_count, 8)) as executor:
-        futures = {
-            executor.submit(
-                post_json,
-                f"http://{node.internal_ip}:{cluster.api_port}/telemetry/refresh",
+    with ThreadPoolExecutor(
+        max_workers=min(node_count, args.source_workers)
+    ) as executor:
+        futures = {}
+        for node in cluster.nodes:
+            peers = [peer for peer in cluster.nodes if peer.id != node.id]
+            future = executor.submit(
+                refresh_source_edges,
+                node,
+                peers,
+                cluster.api_port,
                 args.timeout_seconds,
-            ): node
-            for node in cluster.nodes
-        }
+            )
+            futures[future] = node
+
         for future in as_completed(futures):
             node = futures[future]
             results[node.id] = future.result()
@@ -70,6 +129,13 @@ def main() -> int:
                 f"Node identity mismatch for {node.id}: {result.get('node_id')}"
             )
         edges = dict(result.get("edges") or {})
+        failures = dict(result.get("failures") or {})
+        if failures:
+            detail = ", ".join(
+                f"{node.id}->{destination_id}: {message}"
+                for destination_id, message in sorted(failures.items())
+            )
+            raise RuntimeError(f"Live edge refresh failed: {detail}")
         if int(result.get("peer_count", -1)) != node_count - 1:
             raise RuntimeError(
                 f"{node.id} reported peer_count={result.get('peer_count')}; "
