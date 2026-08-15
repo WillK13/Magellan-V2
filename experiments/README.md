@@ -78,3 +78,14 @@ The directed-network characterization refreshes each edge immediately before
 prediction and then tests a separate 4 MiB transfer without feeding that held-out
 sample back into telemetry. The mechanism remains topology-derived for arbitrary
 cluster size; no node IDs or measured link values are embedded in scheduler logic.
+
+### Stage 3A final compact migration matrix
+
+After freezing the Stage-3A transfer and migration models, use
+`scripts/run_migration_validation_matrix.py` for the final synthetic real-system
+validation before LLM/Dendro. The default campaign runs four representative directed
+WAN paths at 10 MiB, 100 MiB, and 500 MiB with two migrations per case. It preserves
+all cold/fallback samples but reports headline accuracy only over samples that actually
+used measured migration calibration and a live transfer model. `matrix_summary.json`
+and `matrix_cases.csv` are descriptive outputs; the validator checks completeness and
+checksums but intentionally does not turn an accuracy target into a pass/fail filter.
