@@ -63,11 +63,26 @@ class DendroCheckpointDiscoverySpec(BaseModel):
     expected_rank_count: int | None = Field(default=None, ge=1)
     stability_seconds: float = Field(default=2.0, ge=0)
     include_sha256: bool = True
+    native_bssn_prefix: str | None = None
+    native_bssn_step_key: str = "DENDRO_TS_STEP_CURRENT"
 
     @model_validator(mode="after")
     def validate_discovery(self) -> "DendroCheckpointDiscoverySpec":
-        if not self.file_globs:
-            raise ValueError("Dendro checkpoint discovery requires file_globs")
+        if not self.file_globs and self.native_bssn_prefix is None:
+            raise ValueError(
+                "Dendro checkpoint discovery requires file_globs or "
+                "native_bssn_prefix"
+            )
+        if self.native_bssn_prefix is not None:
+            prefix = Path(self.native_bssn_prefix)
+            if (
+                prefix.is_absolute()
+                or len(prefix.parts) != 1
+                or prefix.name in {"", ".", ".."}
+            ):
+                raise ValueError(
+                    "native_bssn_prefix must be a safe filename prefix"
+                )
         for name, pattern in {
             "step_regex": self.step_regex,
             "rank_regex": self.rank_regex,

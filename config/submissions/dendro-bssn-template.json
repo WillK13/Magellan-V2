@@ -27,6 +27,7 @@
       "minimum_cpu_cores": 2,
       "minimum_memory_mb": 3072,
       "required_commands": [
+        "python3",
         "mpirun"
       ],
       "required_runtimes": {
@@ -46,17 +47,18 @@
   "runtime": {
     "adapter": "dendro",
     "command": [
-      "mpirun",
-      "-np",
-      "2",
-      "<SET_ABSOLUTE_PATH_TO_BSSN_SOLVER>"
+      "python3",
+      "scripts/run_real_dendro_bssn.py"
     ],
     "arguments": [
-      "<SET_ABSOLUTE_PATH_TO_PARAMETER_FILE>"
+      "<SET_ABSOLUTE_PATH_TO_BSSN_SOLVER>",
+      "<SET_ABSOLUTE_PATH_TO_PARAMETER_TEMPLATE>",
+      "--world-size",
+      "2",
+      "--ts-mode",
+      "1"
     ],
-    "resume_arguments": [
-      "<SET_REAL_DENDRO_RESUME_ARGUMENTS>"
-    ],
+    "resume_arguments": [],
     "environment": {},
     "working_directory": ".",
     "checkpoint_relative_path": "checkpoint/dendro.marker",
@@ -70,19 +72,19 @@
     "minimum_process_count": 3,
     "dendro_options": {
       "checkpoint_discovery": {
-        "file_globs": [
-          "**/*checkpoint*step_*rank_*"
-        ],
-        "step_regex": "step[_-](?P<step>\\d+)",
-        "rank_regex": "rank[_-](?P<rank>\\d+)",
-        "expected_file_count": null,
+        "file_globs": [],
+        "step_regex": null,
+        "rank_regex": null,
+        "expected_file_count": 6,
         "expected_rank_count": 2,
         "stability_seconds": 5,
-        "include_sha256": true
+        "include_sha256": true,
+        "native_bssn_prefix": "bssn_cp",
+        "native_bssn_step_key": "DENDRO_TS_STEP_CURRENT"
       },
       "progress": {
         "log_relative_path": "logs/process.log",
-        "step_regex": "(?:BSSN|timestep|step)[^0-9]*(?P<step>\\d+)",
+        "step_regex": "(?:checkpoint at step|step)[^0-9]*(?P<step>\\d+)",
         "total_steps": null
       },
       "completion": {

@@ -41,6 +41,181 @@ def _extract_number(pattern: str | None, value: str, name: str) -> int | None:
 class DendroCheckpointDiscovery:
     """Build a complete manifest from stable Dendro rank checkpoints."""
 
+    @staticmethod
+    def _write_manifest(
+        *,
+        manifest_path: Path,
+        checkpoint_step: int,
+        expected_rank_count: int | None,
+        files: list[dict[str, int | str]],
+        generation: int | None = None,
+    ) -> Path:
+        manifest = {
+            "format_version": 1,
+            "workload_type": "dendro-gr",
+            "checkpoint_step": checkpoint_step,
+            "expected_rank_count": expected_rank_count,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "files": files,
+        }
+        if generation is not None:
+            manifest["checkpoint_generation"] = generation
+        temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(manifest_path)
+        return manifest_path
+
+    def _discover_native_bssn(
+        self,
+        *,
+        checkpoint_directory: Path,
+        manifest_path: Path,
+        spec: DendroCheckpointDiscoverySpec,
+    ) -> Path | None:
+        prefix = spec.native_bssn_prefix
+        if prefix is None:
+            return None
+        now = time.time()
+        generation_pattern = re.compile(
+            rf"^{re.escape(prefix)}_(?P<generation>\d+)_step\.cp$"
+        )
+        candidates: list[tuple[int, int, list[tuple[Path, int | None]]]] = []
+
+        for step_path in checkpoint_directory.glob(f"{prefix}_*_step.cp"):
+            match = generation_pattern.fullmatch(step_path.name)
+            if match is None or not step_path.is_file():
+                continue
+            generation = int(match.group("generation"))
+            try:
+                metadata = json.loads(step_path.read_text(encoding="utf-8"))
+                checkpoint_step = metadata[spec.native_bssn_step_key]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                continue
+            if not isinstance(checkpoint_step, int):
+                continue
+
+            if spec.expected_rank_count is None:
+                ranks = sorted(
+                    int(match.group("rank"))
+                    for path in checkpoint_directory.glob(
+                        f"{prefix}_{generation}_*.var"
+                    )
+                    if (
+                        match := re.fullmatch(
+                            rf"{re.escape(prefix)}_{generation}_"
+                            r"(?P<rank>\d+)\.var",
+                            path.name,
+                        )
+                    )
+                )
+            else:
+                ranks = list(range(spec.expected_rank_count))
+            if not ranks:
+                continue
+
+            selected: list[tuple[Path, int | None]] = [(step_path, None)]
+            complete = True
+            for rank in ranks:
+                selected.extend(
+                    [
+                        (
+                            checkpoint_directory
+                            / f"{prefix}_{generation}_{rank}.var",
+                            rank,
+                        ),
+                        (
+                            checkpoint_directory
+                            / f"{prefix}_{generation}_octree_{rank}.oct",
+                            rank,
+                        ),
+                    ]
+                )
+            selected.append(
+                (
+                    checkpoint_directory
+                    / f"{prefix}_aeh_solver_checkpt-cp{generation}.json",
+                    None,
+                )
+            )
+
+            for path, _rank in selected:
+                if (
+                    not path.is_file()
+                    or path.stat().st_size <= 0
+                    or now - path.stat().st_mtime < spec.stability_seconds
+                ):
+                    complete = False
+                    break
+            if not complete:
+                continue
+            if (
+                spec.expected_file_count is not None
+                and len(selected) != spec.expected_file_count
+            ):
+                continue
+            candidates.append((checkpoint_step, generation, selected))
+
+        if not candidates:
+            return None
+        checkpoint_step, generation, selected = max(
+            candidates,
+            key=lambda item: (item[0], item[1]),
+        )
+        selected = sorted(selected, key=lambda item: item[0].name)
+        selected_sizes = {
+            path.relative_to(checkpoint_directory).as_posix(): path.stat().st_size
+            for path, _rank in selected
+        }
+        if manifest_path.is_file():
+            try:
+                existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+                existing_files = existing.get("files", [])
+                existing_sizes = {
+                    item.get("path"): item.get("size_bytes")
+                    for item in existing_files
+                    if isinstance(item, dict)
+                }
+                digests_ready = (
+                    not spec.include_sha256
+                    or all(
+                        isinstance(item, dict) and item.get("sha256")
+                        for item in existing_files
+                    )
+                )
+                if (
+                    existing.get("checkpoint_step") == checkpoint_step
+                    and existing.get("checkpoint_generation") == generation
+                    and existing_sizes == selected_sizes
+                    and digests_ready
+                ):
+                    return manifest_path
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        files: list[dict[str, int | str]] = []
+        for path, rank in selected:
+            relative = path.relative_to(checkpoint_directory)
+            entry: dict[str, int | str] = {
+                "path": relative.as_posix(),
+                "size_bytes": path.stat().st_size,
+            }
+            if rank is not None:
+                entry["rank"] = rank
+            if spec.include_sha256:
+                entry["sha256"] = _digest(path)
+            files.append(entry)
+        return self._write_manifest(
+            manifest_path=manifest_path,
+            checkpoint_step=checkpoint_step,
+            expected_rank_count=spec.expected_rank_count,
+            files=files,
+            generation=generation,
+        )
+
     def discover(
         self,
         *,
@@ -49,6 +224,12 @@ class DendroCheckpointDiscovery:
         spec: DendroCheckpointDiscoverySpec,
     ) -> Path | None:
         checkpoint_directory.mkdir(parents=True, exist_ok=True)
+        if spec.native_bssn_prefix is not None:
+            return self._discover_native_bssn(
+                checkpoint_directory=checkpoint_directory,
+                manifest_path=manifest_path,
+                spec=spec,
+            )
         now = time.time()
         candidates: dict[Path, tuple[int, int | None]] = {}
 
@@ -138,22 +319,12 @@ class DendroCheckpointDiscovery:
                 entry["sha256"] = _digest(path)
             files.append(entry)
 
-        manifest = {
-            "format_version": 1,
-            "workload_type": "dendro-gr",
-            "checkpoint_step": selected_step,
-            "expected_rank_count": spec.expected_rank_count,
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "files": files,
-        }
-        temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-        temporary.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        return self._write_manifest(
+            manifest_path=manifest_path,
+            checkpoint_step=selected_step,
+            expected_rank_count=spec.expected_rank_count,
+            files=files,
         )
-        temporary.replace(manifest_path)
-        return manifest_path
 
 
 def _read_log_tail(path: Path, maximum_bytes: int) -> str:

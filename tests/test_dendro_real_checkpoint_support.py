@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+
 from magellan.models.types import TaskProfile
 from magellan.runtime.checkpoint import CheckpointManager
 from magellan.runtime.dendro import DendroProgressSynchronizer
@@ -159,3 +160,79 @@ def test_dendro_clean_exit_can_synthesize_completion_marker(tmp_path) -> None:
     assert state.status == TaskStatus.COMPLETED
     marker = registry.completion_file("dendro-completion")
     assert marker is not None and marker.is_file()
+
+
+def test_discovers_latest_native_bssn_checkpoint_generation(tmp_path) -> None:
+    task = definition().model_copy(deep=True)
+    task.runtime.dendro_options.checkpoint_discovery = (
+        DendroCheckpointDiscoverySpec(
+            native_bssn_prefix="bssn_cp",
+            expected_file_count=6,
+            expected_rank_count=2,
+            stability_seconds=0,
+        )
+    )
+    registry = PersistentTaskRegistry(
+        definitions=[task],
+        state_root=tmp_path,
+        local_node_id="boston",
+    )
+    directory = registry.checkpoint_directory("real-dendro")
+    directory.mkdir(parents=True)
+
+    def write_generation(generation: int, step: int) -> None:
+        (directory / f"bssn_cp_{generation}_step.cp").write_text(
+            json.dumps({"DENDRO_TS_STEP_CURRENT": step}),
+            encoding="utf-8",
+        )
+        for rank in range(2):
+            (directory / f"bssn_cp_{generation}_{rank}.var").write_bytes(
+                f"var-{generation}-{rank}".encode()
+            )
+            (
+                directory / f"bssn_cp_{generation}_octree_{rank}.oct"
+            ).write_bytes(f"oct-{generation}-{rank}".encode())
+        (
+            directory
+            / f"bssn_cp_aeh_solver_checkpt-cp{generation}.json"
+        ).write_text("{}", encoding="utf-8")
+
+    write_generation(0, 77)
+    write_generation(1, 79)
+    summary = CheckpointManager(registry).validate("real-dendro")
+    manifest = json.loads(summary.manifest_path.read_text(encoding="utf-8"))
+
+    assert summary.checkpoint_step == 79
+    assert summary.file_count == 6
+    assert manifest["checkpoint_generation"] == 1
+    assert manifest["checkpoint_step"] == 79
+    assert {item.get("rank") for item in manifest["files"]} == {0, 1, None}
+    assert all("sha256" in item for item in manifest["files"])
+    assert all("_0_" not in item["path"] for item in manifest["files"] if item["path"].endswith((".var", ".oct")))
+
+
+def test_real_bssn_launcher_renders_checkpoint_paths(tmp_path) -> None:
+    from scripts.run_real_dendro_bssn import render_runtime_parameters
+
+    template = tmp_path / "template.toml"
+    template.write_text(
+        "BSSN_RESTORE_SOLVER = 0\n"
+        'BSSN_CHKPT_FILE_PREFIX = "cp/bssn_cp"\n'
+        'BSSN_VTU_FILE_PREFIX = "vtu/bssn_gr"\n'
+        'BSSN_PROFILE_FILE_PREFIX = "dat/dgr"\n',
+        encoding="utf-8",
+    )
+    checkpoint = tmp_path / "task" / "checkpoint"
+    output = tmp_path / "task" / "output"
+    rendered = render_runtime_parameters(
+        template_path=template,
+        output_path=tmp_path / "task" / "runtime.toml",
+        checkpoint_directory=checkpoint,
+        output_directory=output,
+        resume=True,
+    )
+    text = rendered.read_text(encoding="utf-8")
+    assert "BSSN_RESTORE_SOLVER = 1" in text
+    assert str(checkpoint / "bssn_cp") in text
+    assert str(output / "vtu" / "bssn_gr") in text
+    assert str(output / "dat" / "dgr") in text
