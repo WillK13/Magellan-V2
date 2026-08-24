@@ -40,6 +40,7 @@ class NodeConfig(BaseModel):
     # Actual GCP identity
     vm_name: str = Field(min_length=1)
     zone: str = Field(min_length=1)
+    machine_type: str | None = Field(default=None, min_length=1)
     internal_ip: IPvAnyAddress
 
     # Logical datacenter identity

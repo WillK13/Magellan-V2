@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from magellan.api.peer_client import check_all_peers
+from magellan.capabilities.discovery import runtime_version_matches
 from magellan.bidding.models import (
     BidRecord,
     BidRequest,
@@ -269,7 +270,7 @@ async def capabilities() -> dict:
         observed_version = observed.runtimes.get(runtime)
         if observed_version is None:
             drift.append(f"configured runtime missing locally: {runtime}")
-        elif not observed_version.startswith(configured_version):
+        elif not runtime_version_matches(configured_version, observed_version):
             drift.append(
                 f"configured {runtime} version {configured_version}; "
                 f"observed {observed_version}"

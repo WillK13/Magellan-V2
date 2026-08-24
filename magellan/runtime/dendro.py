@@ -397,7 +397,16 @@ class DendroProgressSynchronizer:
         if not log_path.is_file():
             return False
         text = _read_log_tail(log_path, spec.max_log_bytes)
-        matches = list(re.finditer(spec.step_regex, text))
+        # Evaluate the progress expression one log line at a time.  Real
+        # Dendro checkpoint paths contain names such as ``bssn_cp_0_step.cp``.
+        # A permissive expression like ``step[^0-9]*(\d+)`` can otherwise
+        # cross the newline after that filename and consume the year from the
+        # next timestamp (for example, 2026) as the numerical timestep.
+        matches = [
+            match
+            for line in text.splitlines()
+            for match in re.finditer(spec.step_regex, line)
+        ]
         if not matches:
             return False
         match = matches[-1]

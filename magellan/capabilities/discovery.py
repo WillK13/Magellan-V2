@@ -2,12 +2,40 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 from magellan.capabilities.models import NodeRuntimeCapabilities
 from magellan.config.models import NodeConfig
+
+
+_RUNTIME_VERSION_RE = re.compile(r"(?<!\d)(\d+(?:\.\d+)+)(?!\d)")
+
+
+def _runtime_version_tuple(value: str) -> tuple[int, ...] | None:
+    match = _RUNTIME_VERSION_RE.search(value)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def runtime_version_matches(configured: str, observed: str) -> bool:
+    """Compare configured runtime versions with human-readable tool output.
+
+    Discovery commands commonly return a banner rather than a bare version,
+    for example ``mpirun (Open MPI) 4.1.4``.  A configured prefix such as
+    ``3.11`` should also accept an observed patch version such as ``3.11.2``.
+    """
+
+    if observed.startswith(configured):
+        return True
+    configured_parts = _runtime_version_tuple(configured)
+    observed_parts = _runtime_version_tuple(observed)
+    if configured_parts is None or observed_parts is None:
+        return False
+    return observed_parts[: len(configured_parts)] == configured_parts
 
 
 def _memory_mb() -> int | None:

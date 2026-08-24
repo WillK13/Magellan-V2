@@ -239,3 +239,37 @@ def test_real_bssn_launcher_renders_checkpoint_paths(tmp_path) -> None:
     assert str(output / "dat" / "dgr") in text
     assert str(output / "aeh") in text
     assert (output / "aeh").is_dir()
+
+
+def test_dendro_log_parser_does_not_cross_lines_into_timestamp(tmp_path) -> None:
+    task = definition().model_copy(deep=True)
+    task.runtime.dendro_options.progress.step_regex = (
+        r"(?:checkpoint at step|step)[^\r\n0-9]*(?P<step>\d+)"
+    )
+    registry = PersistentTaskRegistry(
+        definitions=[task],
+        state_root=tmp_path,
+        local_node_id="boston",
+    )
+    log = registry.task_directory("real-dendro") / "logs/process.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "[BSSNCtx] writing checkpoint file: /tmp/bssn_cp_0_step.cp\n"
+        "[2026-08-24 20:31:16.290] [dendro] checkpoint complete\n",
+        encoding="utf-8",
+    )
+
+    assert not DendroProgressSynchronizer(registry).refresh("real-dendro")
+    assert not registry.progress_file("real-dendro").exists()
+
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "[2026-08-24 20:31:17.000] [dendro] "
+            "checkpoint at step 13\n"
+        )
+
+    assert DendroProgressSynchronizer(registry).refresh("real-dendro")
+    payload = json.loads(
+        registry.progress_file("real-dendro").read_text(encoding="utf-8")
+    )
+    assert payload["completed_units"] == 13

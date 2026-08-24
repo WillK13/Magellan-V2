@@ -84,7 +84,7 @@
       },
       "progress": {
         "log_relative_path": "logs/process.log",
-        "step_regex": "(?:checkpoint at step|step)[^0-9]*(?P<step>\\d+)",
+        "step_regex": "(?:checkpoint at step|step)[^\\r\\n0-9]*(?P<step>\\d+)",
         "total_steps": null
       },
       "completion": {
