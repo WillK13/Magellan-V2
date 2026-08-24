@@ -20,7 +20,7 @@
       "egress_price_usd_per_gb": 0.02,
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": []
       },
@@ -28,23 +28,26 @@
         "architecture": "x86_64",
         "operating_system": "linux",
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpirun",
           "python3",
           "rsync"
         ],
         "runtimes": {
-          "python": "3.11"
+          "python": "3.11",
+          "openmpi": "4.1.4"
         },
         "features": [
-          "local-command",
-          "python-module",
-          "process-group",
           "application-checkpoint",
-          "dendro-adapter"
+          "dendro-adapter",
+          "local-command",
+          "mpi",
+          "process-group",
+          "python-module"
         ]
       }
     },
@@ -64,7 +67,7 @@
       "egress_price_usd_per_gb": 0.02,
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": []
       },
@@ -72,7 +75,7 @@
         "architecture": "x86_64",
         "operating_system": "linux",
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": [],
         "commands": [
@@ -108,7 +111,7 @@
       "egress_price_usd_per_gb": 0.02,
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": []
       },
@@ -116,7 +119,7 @@
         "architecture": "x86_64",
         "operating_system": "linux",
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": [],
         "commands": [
@@ -152,7 +155,7 @@
       "egress_price_usd_per_gb": 0.02,
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": []
       },
@@ -160,7 +163,7 @@
         "architecture": "x86_64",
         "operating_system": "linux",
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": [],
         "commands": [
@@ -196,7 +199,7 @@
       "egress_price_usd_per_gb": 0.02,
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": []
       },
@@ -204,7 +207,7 @@
         "architecture": "x86_64",
         "operating_system": "linux",
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": [],
         "commands": [
@@ -240,7 +243,7 @@
       "egress_price_usd_per_gb": 0.02,
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": []
       },
@@ -248,7 +251,7 @@
         "architecture": "x86_64",
         "operating_system": "linux",
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": [],
         "commands": [
@@ -284,7 +287,7 @@
       "egress_price_usd_per_gb": 0.02,
       "resources": {
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": []
       },
@@ -292,23 +295,26 @@
         "architecture": "x86_64",
         "operating_system": "linux",
         "cpu_cores": 2,
-        "memory_mb": 4096,
+        "memory_mb": 16384,
         "gpu_count": 0,
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpirun",
           "python3",
           "rsync"
         ],
         "runtimes": {
-          "python": "3.11"
+          "python": "3.11",
+          "openmpi": "4.1.4"
         },
         "features": [
-          "local-command",
-          "python-module",
-          "process-group",
           "application-checkpoint",
-          "dendro-adapter"
+          "dendro-adapter",
+          "local-command",
+          "mpi",
+          "process-group",
+          "python-module"
         ]
       }
     }
