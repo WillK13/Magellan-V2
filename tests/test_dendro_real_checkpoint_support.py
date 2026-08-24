@@ -219,7 +219,8 @@ def test_real_bssn_launcher_renders_checkpoint_paths(tmp_path) -> None:
         "BSSN_RESTORE_SOLVER = 0\n"
         'BSSN_CHKPT_FILE_PREFIX = "cp/bssn_cp"\n'
         'BSSN_VTU_FILE_PREFIX = "vtu/bssn_gr"\n'
-        'BSSN_PROFILE_FILE_PREFIX = "dat/dgr"\n',
+        'BSSN_PROFILE_FILE_PREFIX = "dat/dgr"\n'
+        'AEH_SAVE_DIR = "aeh"\n',
         encoding="utf-8",
     )
     checkpoint = tmp_path / "task" / "checkpoint"
@@ -236,3 +237,5 @@ def test_real_bssn_launcher_renders_checkpoint_paths(tmp_path) -> None:
     assert str(checkpoint / "bssn_cp") in text
     assert str(output / "vtu" / "bssn_gr") in text
     assert str(output / "dat" / "dgr") in text
+    assert str(output / "aeh") in text
+    assert (output / "aeh").is_dir()

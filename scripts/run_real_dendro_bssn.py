@@ -27,10 +27,12 @@ def render_runtime_parameters(
     checkpoint_prefix = checkpoint_directory / "bssn_cp"
     vtu_prefix = output_directory / "vtu" / "bssn_gr"
     profile_prefix = output_directory / "dat" / "dgr"
+    aeh_directory = output_directory / "aeh"
     for directory in (
         checkpoint_directory,
         vtu_prefix.parent,
         profile_prefix.parent,
+        aeh_directory,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     replacements = {
@@ -38,6 +40,7 @@ def render_runtime_parameters(
         "BSSN_CHKPT_FILE_PREFIX": repr(str(checkpoint_prefix)),
         "BSSN_VTU_FILE_PREFIX": repr(str(vtu_prefix)),
         "BSSN_PROFILE_FILE_PREFIX": repr(str(profile_prefix)),
+        "AEH_SAVE_DIR": repr(str(aeh_directory)),
     }
     for key, value in replacements.items():
         text = _replace_toml_value(text, key, value)
