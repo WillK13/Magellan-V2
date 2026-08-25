@@ -107,3 +107,15 @@ and training progress survive migration. Checkpoint IDs are matched across the
 source stop checkpoint and destination restore, and training must advance after
 resume. Use `validate_llm_migration_measurement.py` to validate the checksummed
 bundle.
+
+### Stage 4A.1 final hardware + network calibration
+
+After the Stage-3C experiment-readiness freeze, run
+`scripts/run_stage4a1_calibration.py` from Boston. The wrapper verifies that all
+configured nodes are idle, healthy, capability-ready, on the same Git commit, and
+actually report the configured GCP machine type through the metadata service. It
+then executes the existing transport-faithful directed-WAN characterization over
+all topology-derived directed edges with repeated held-out samples. Hardware,
+raw network evidence, global descriptive statistics, and checksums are preserved
+under one `stage4a1-*` measurement bundle. Validate it with
+`scripts/validate_stage4a1_calibration.py` before beginning workload calibration.
