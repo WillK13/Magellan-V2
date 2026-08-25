@@ -16,7 +16,7 @@ from uuid import uuid4
 from magellan.config.loader import load_cluster_config
 from magellan.experiments.bundle import write_checksums, write_csv, write_json
 from magellan.experiments.measurement import signed_percent_error
-from magellan.experiments.stage4a2 import summarize_profile_samples
+from magellan.experiments.stage4a2 import fresh_run_idempotency_key, summarize_profile_samples
 from magellan.experiments.workload_population import benchmark_definition, dendro_definition
 
 
@@ -294,7 +294,7 @@ def main() -> int:
         "definition_id": created["definition_id"],
         "revision": created["revision"],
         "initial_owner_node_id": args.source,
-        "idempotency_key": f"{measurement_id}-run",
+        "idempotency_key": fresh_run_idempotency_key(measurement_id),
         "auto_start": True,
         "labels": {
             "purpose": "stage4a2-workload-calibration",

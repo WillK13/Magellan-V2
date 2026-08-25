@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from magellan.experiments.stage4a2 import (
+    fresh_run_idempotency_key,
     select_representative_edges,
     summarize_migration_accuracy,
     summarize_profile_samples,
@@ -74,3 +75,12 @@ def test_migration_summary_does_not_encode_acceptance_thresholds() -> None:
     assert summary["restore_absolute_error_percent"]["median"] == pytest.approx(50)
     assert summary["downtime_absolute_error_percent"]["median"] == pytest.approx(20)
     assert "passed" not in summary
+
+
+def test_stage4a2_run_idempotency_keys_are_fresh_per_execution() -> None:
+    first = fresh_run_idempotency_key("benchmark-nbody-small-short")
+    second = fresh_run_idempotency_key("benchmark-nbody-small-short")
+
+    assert first.startswith("benchmark-nbody-small-short-run-")
+    assert second.startswith("benchmark-nbody-small-short-run-")
+    assert first != second

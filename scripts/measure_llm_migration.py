@@ -23,7 +23,7 @@ from magellan.experiments.llm_validation import (
     last_checkpoint_event,
 )
 from magellan.experiments.measurement import absolute_percent_error, signed_percent_error
-from magellan.experiments.stage4a2 import summarize_profile_samples
+from magellan.experiments.stage4a2 import fresh_run_idempotency_key, summarize_profile_samples
 
 
 MIB = 1024 * 1024
@@ -729,7 +729,7 @@ def main() -> int:
         "definition_id": created["definition_id"],
         "revision": created["revision"],
         "initial_owner_node_id": initial_id,
-        "idempotency_key": f"{measurement_id}-run",
+        "idempotency_key": fresh_run_idempotency_key(measurement_id),
         "auto_start": True,
         "labels": {
             "purpose": "real-llm-migration-validation",

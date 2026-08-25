@@ -5,8 +5,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from typing import Any, Iterable
+from uuid import uuid4
 
 from magellan.experiments.measurement import absolute_percent_error, summarize_samples
+
+
+def fresh_run_idempotency_key(measurement_id: str) -> str:
+    """Return a per-execution task-run key while preserving measurement provenance.
+
+    Stage 4A.2 case names are intentionally stable across campaigns and resume
+    attempts. Reusing ``<measurement>-run`` would cause the API to return an
+    earlier task run with the same idempotency key, including a completed run.
+    A fresh suffix keeps duplicate protection within the single POST while making
+    every actual calibration execution distinct.
+    """
+
+    return f"{measurement_id}-run-{uuid4().hex}"
 
 
 @dataclass(frozen=True)
