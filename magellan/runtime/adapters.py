@@ -43,8 +43,9 @@ class PythonModuleAdapter:
         checkpoint_directory: Path,
         checkpoint_file: Path,
     ) -> RuntimeLaunchPlan:
-        del checkpoint_directory, checkpoint_file
+        del checkpoint_directory
         assert spec.module is not None
+        resumed = checkpoint_file.is_file() and checkpoint_file.stat().st_size > 0
         return RuntimeLaunchPlan(
             adapter=self.name,
             command=[
@@ -53,6 +54,10 @@ class PythonModuleAdapter:
                 spec.module,
                 *[render(item) for item in spec.arguments],
             ],
+            # Python-module workloads receive the rendered checkpoint path in
+            # their arguments and own application-level restore. A transferred
+            # non-empty checkpoint therefore means this launch is a resume.
+            resumed_from_checkpoint=resumed,
         )
 
 

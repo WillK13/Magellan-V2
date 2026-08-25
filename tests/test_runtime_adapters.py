@@ -71,6 +71,34 @@ def test_adapter_registry_builds_command_and_dendro_resume(tmp_path) -> None:
     assert dendro.environment["MAGELLAN_DENDRO_RESUME"] == "1"
 
 
+def test_python_module_adapter_marks_transferred_checkpoint_as_resume(tmp_path) -> None:
+    registry = RuntimeAdapterRegistry()
+    spec = LocalProcessSpec(
+        adapter="python_module",
+        module="magellan.workloads.counter",
+        arguments=["--checkpoint-file", "{checkpoint_file}"],
+    )
+    checkpoint = tmp_path / "checkpoint" / "state.json"
+
+    first = registry.get("python_module").build_launch_plan(
+        spec,
+        lambda value: value.format(checkpoint_file=str(checkpoint)),
+        checkpoint.parent,
+        checkpoint,
+    )
+    assert first.resumed_from_checkpoint is False
+
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text('{"value": 7}', encoding="utf-8")
+    second = registry.get("python_module").build_launch_plan(
+        spec,
+        lambda value: value.format(checkpoint_file=str(checkpoint)),
+        checkpoint.parent,
+        checkpoint,
+    )
+    assert second.resumed_from_checkpoint is True
+
+
 def test_generic_command_runtime_records_launch_metadata(tmp_path) -> None:
     script = tmp_path / "command_workload.py"
     script.write_text(
