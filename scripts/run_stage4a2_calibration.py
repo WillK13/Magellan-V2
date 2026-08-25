@@ -20,7 +20,7 @@ from magellan.experiments.stage4a2 import (
 BENCHMARKS = ("nbody", "json", "matmul")
 SIZES = ("small", "medium", "large")
 DENDRO_VARIANTS = (
-    ("short", 8, 0.5),
+    ("short", 8, 3.0),
     ("medium", 9, 1.0),
     ("long", 10, 2.0),
 )

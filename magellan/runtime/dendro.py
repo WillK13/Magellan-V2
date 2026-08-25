@@ -9,6 +9,7 @@ import time
 
 from magellan.state.persistent_registry import PersistentTaskRegistry
 from magellan.runtime.completion import CompletionMarker
+from magellan.runtime.progress import load_progress
 from magellan.state.task_models import (
     DendroCheckpointDiscoverySpec,
     DendroCompletionSpec,
@@ -69,13 +70,20 @@ class DendroCheckpointDiscovery:
         temporary.replace(manifest_path)
         return manifest_path
 
-    def _discover_native_bssn(
+    def _latest_complete_native_bssn(
         self,
         *,
         checkpoint_directory: Path,
-        manifest_path: Path,
         spec: DendroCheckpointDiscoverySpec,
-    ) -> Path | None:
+    ) -> tuple[int, int, list[tuple[Path, int | None]]] | None:
+        """Return the newest complete, stable native BSSN checkpoint family.
+
+        Native BSSN alternates checkpoint generations (for example cp0/cp1),
+        so generation number alone is not progress.  Selection is therefore
+        ordered by the checkpoint step first and generation only as a
+        deterministic tie-breaker.
+        """
+
         prefix = spec.native_bssn_prefix
         if prefix is None:
             return None
@@ -100,12 +108,12 @@ class DendroCheckpointDiscovery:
 
             if spec.expected_rank_count is None:
                 ranks = sorted(
-                    int(match.group("rank"))
+                    int(rank_match.group("rank"))
                     for path in checkpoint_directory.glob(
                         f"{prefix}_{generation}_*.var"
                     )
                     if (
-                        match := re.fullmatch(
+                        rank_match := re.fullmatch(
                             rf"{re.escape(prefix)}_{generation}_"
                             r"(?P<rank>\d+)\.var",
                             path.name,
@@ -118,7 +126,6 @@ class DendroCheckpointDiscovery:
                 continue
 
             selected: list[tuple[Path, int | None]] = [(step_path, None)]
-            complete = True
             for rank in ranks:
                 selected.extend(
                     [
@@ -142,14 +149,18 @@ class DendroCheckpointDiscovery:
                 )
             )
 
-            for path, _rank in selected:
-                if (
-                    not path.is_file()
-                    or path.stat().st_size <= 0
-                    or now - path.stat().st_mtime < spec.stability_seconds
-                ):
-                    complete = False
-                    break
+            try:
+                complete = all(
+                    path.is_file()
+                    and path.stat().st_size > 0
+                    and now - path.stat().st_mtime >= spec.stability_seconds
+                    for path, _rank in selected
+                )
+            except OSError:
+                # A rotating checkpoint family can be replaced while it is
+                # being inspected. Treat that observation as incomplete and
+                # retry on the next refresh instead of disrupting accounting.
+                complete = False
             if not complete:
                 continue
             if (
@@ -161,10 +172,54 @@ class DendroCheckpointDiscovery:
 
         if not candidates:
             return None
-        checkpoint_step, generation, selected = max(
-            candidates,
-            key=lambda item: (item[0], item[1]),
+        return max(candidates, key=lambda item: (item[0], item[1]))
+
+    def latest_complete_native_bssn_step(
+        self,
+        *,
+        checkpoint_directory: Path,
+        spec: DendroCheckpointDiscoverySpec,
+    ) -> tuple[int, int, datetime] | None:
+        """Observe native BSSN progress without materializing a manifest.
+
+        This intentionally reuses the exact completeness/stability checks used
+        by migration validation, but avoids hashing large checkpoint files on
+        every accounting refresh.
+        """
+
+        candidate = self._latest_complete_native_bssn(
+            checkpoint_directory=checkpoint_directory,
+            spec=spec,
         )
+        if candidate is None:
+            return None
+        checkpoint_step, generation, selected = candidate
+        try:
+            observed_mtime = max(
+                path.stat().st_mtime for path, _rank in selected
+            )
+        except OSError:
+            return None
+        return (
+            checkpoint_step,
+            generation,
+            datetime.fromtimestamp(observed_mtime, tz=timezone.utc),
+        )
+
+    def _discover_native_bssn(
+        self,
+        *,
+        checkpoint_directory: Path,
+        manifest_path: Path,
+        spec: DendroCheckpointDiscoverySpec,
+    ) -> Path | None:
+        candidate = self._latest_complete_native_bssn(
+            checkpoint_directory=checkpoint_directory,
+            spec=spec,
+        )
+        if candidate is None:
+            return None
+        checkpoint_step, generation, selected = candidate
         selected = sorted(selected, key=lambda item: item[0].name)
         selected_sizes = {
             path.relative_to(checkpoint_directory).as_posix(): path.stat().st_size
@@ -380,8 +435,24 @@ class DendroCompletionSynthesizer:
 
 
 class DendroProgressSynchronizer:
-    def __init__(self, registry: PersistentTaskRegistry) -> None:
+    def __init__(
+        self,
+        registry: PersistentTaskRegistry,
+        checkpoint_discovery: DendroCheckpointDiscovery | None = None,
+    ) -> None:
         self._registry = registry
+        self._checkpoint_discovery = (
+            checkpoint_discovery or DendroCheckpointDiscovery()
+        )
+
+    @staticmethod
+    def _step_from_match(match: re.Match[str]) -> float | None:
+        raw = match.groupdict().get("step")
+        if raw is None and match.groups():
+            raw = match.group(1)
+        if raw is None:
+            return None
+        return float(raw)
 
     def refresh(self, task_id: str) -> bool:
         definition = self._registry.get_definition(task_id)
@@ -393,42 +464,90 @@ class DendroProgressSynchronizer:
         if spec is None or progress_file is None:
             return False
 
+        log_step: float | None = None
         log_path = self._registry.task_directory(task_id) / spec.log_relative_path
-        if not log_path.is_file():
-            return False
-        text = _read_log_tail(log_path, spec.max_log_bytes)
-        # Evaluate the progress expression one log line at a time.  Real
-        # Dendro checkpoint paths contain names such as ``bssn_cp_0_step.cp``.
-        # A permissive expression like ``step[^0-9]*(\d+)`` can otherwise
-        # cross the newline after that filename and consume the year from the
-        # next timestamp (for example, 2026) as the numerical timestep.
-        matches = [
-            match
-            for line in text.splitlines()
-            for match in re.finditer(spec.step_regex, line)
+        if log_path.is_file():
+            text = _read_log_tail(log_path, spec.max_log_bytes)
+            # Evaluate the progress expression one log line at a time.  Real
+            # Dendro checkpoint paths contain names such as
+            # ``bssn_cp_0_step.cp``.  A permissive expression like
+            # ``step[^0-9]*(\d+)`` can otherwise cross the newline after that
+            # filename and consume the year from the next timestamp.
+            matches = [
+                match
+                for line in text.splitlines()
+                for match in re.finditer(spec.step_regex, line)
+            ]
+            if matches:
+                log_step = self._step_from_match(matches[-1])
+
+        checkpoint_step: float | None = None
+        checkpoint_generation: int | None = None
+        checkpoint_observed_at: datetime | None = None
+        discovery_spec = options.checkpoint_discovery
+        if (
+            discovery_spec is not None
+            and discovery_spec.native_bssn_prefix is not None
+        ):
+            observed = self._checkpoint_discovery.latest_complete_native_bssn_step(
+                checkpoint_directory=self._registry.checkpoint_directory(task_id),
+                spec=discovery_spec,
+            )
+            if observed is not None:
+                raw_step, checkpoint_generation, checkpoint_observed_at = observed
+                checkpoint_step = float(raw_step)
+
+        candidates = [
+            value
+            for value in (log_step, checkpoint_step)
+            if value is not None
         ]
-        if not matches:
+        if not candidates:
             return False
-        match = matches[-1]
-        raw = match.groupdict().get("step")
-        if raw is None and match.groups():
-            raw = match.group(1)
-        if raw is None:
-            return False
-        step = float(raw)
+        step = max(candidates)
+
+        existing_step: float | None = None
+        try:
+            existing = load_progress(progress_file, task_id)
+        except (OSError, json.JSONDecodeError, ValueError):
+            existing = None
+        if existing is not None:
+            existing_step = existing.completed_units
+            if step <= existing_step:
+                return False
+
+        checkpoint_selected = (
+            checkpoint_step is not None
+            and checkpoint_step == step
+            and (log_step is None or checkpoint_step >= log_step)
+        )
+        details: dict[str, object] = {
+            "source": (
+                "dendro_native_checkpoint"
+                if checkpoint_selected
+                else "dendro_log_parser"
+            ),
+            "log_relative_path": spec.log_relative_path,
+            "observed_log_step": log_step,
+            "observed_checkpoint_step": checkpoint_step,
+        }
+        if checkpoint_generation is not None:
+            details["checkpoint_generation"] = checkpoint_generation
+        if checkpoint_observed_at is not None:
+            details["checkpoint_observed_at_utc"] = (
+                checkpoint_observed_at.isoformat()
+            )
+
         payload = {
             "format_version": 1,
             "task_id": task_id,
             "completed_units": step,
             "total_units": spec.total_steps,
-            "updated_at_utc": datetime.fromtimestamp(
-                log_path.stat().st_mtime,
-                tz=timezone.utc,
-            ).isoformat(),
-            "details": {
-                "source": "dendro_log_parser",
-                "log_relative_path": spec.log_relative_path,
-            },
+            # This is the observation time, not the checkpoint file mtime.
+            # Using observation time ensures an authoritative checkpoint step
+            # can advance a previously written stale log-derived snapshot.
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "details": details,
         }
         progress_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = progress_file.with_suffix(progress_file.suffix + ".tmp")

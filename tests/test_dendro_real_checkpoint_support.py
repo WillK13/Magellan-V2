@@ -75,6 +75,45 @@ def test_discovers_latest_complete_rank_checkpoint(tmp_path) -> None:
     assert all("sha256" in item for item in manifest["files"])
 
 
+def _write_native_generation(
+    directory,
+    *,
+    generation: int,
+    step: int,
+    complete: bool = True,
+) -> None:
+    (directory / f"bssn_cp_{generation}_step.cp").write_text(
+        json.dumps({"DENDRO_TS_STEP_CURRENT": step}),
+        encoding="utf-8",
+    )
+    for rank in range(2):
+        (directory / f"bssn_cp_{generation}_{rank}.var").write_bytes(
+            f"var-{generation}-{rank}".encode()
+        )
+        if complete or rank == 0:
+            (
+                directory / f"bssn_cp_{generation}_octree_{rank}.oct"
+            ).write_bytes(f"oct-{generation}-{rank}".encode())
+    (
+        directory / f"bssn_cp_aeh_solver_checkpt-cp{generation}.json"
+    ).write_text("{}", encoding="utf-8")
+
+
+def _native_progress_definition() -> TaskDefinition:
+    task = definition().model_copy(deep=True)
+    task.runtime.dendro_options.checkpoint_discovery = (
+        DendroCheckpointDiscoverySpec(
+            native_bssn_prefix="bssn_cp",
+            expected_file_count=6,
+            expected_rank_count=2,
+            stability_seconds=0,
+        )
+    )
+    task.runtime.dendro_options.progress.step_regex = (
+        r"(?:checkpoint at step|step)[^\r\n0-9]*(?P<step>\d+)"
+    )
+    return task
+
 def test_dendro_log_parser_writes_standard_progress(tmp_path) -> None:
     registry = PersistentTaskRegistry(
         definitions=[definition()],
@@ -93,6 +132,88 @@ def test_dendro_log_parser_writes_standard_progress(tmp_path) -> None:
     assert payload["completed_units"] == 25
     assert payload["total_units"] == 100
     assert payload["details"]["source"] == "dendro_log_parser"
+
+
+def test_dendro_progress_uses_latest_complete_native_checkpoint(tmp_path) -> None:
+    registry = PersistentTaskRegistry(
+        definitions=[_native_progress_definition()],
+        state_root=tmp_path,
+        local_node_id="boston",
+    )
+    log = registry.task_directory("real-dendro") / "logs/process.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "[ETS] : Timestep 0 - starting\n"
+        "Current Step: 0\tCurrent time: 0\n",
+        encoding="utf-8",
+    )
+    directory = registry.checkpoint_directory("real-dendro")
+    directory.mkdir(parents=True, exist_ok=True)
+    # BSSN rotates cp0/cp1; generation number is not progress order.
+    _write_native_generation(directory, generation=0, step=5)
+    _write_native_generation(directory, generation=1, step=3)
+
+    assert DendroProgressSynchronizer(registry).refresh("real-dendro")
+    payload = json.loads(
+        registry.progress_file("real-dendro").read_text(encoding="utf-8")
+    )
+
+    assert payload["completed_units"] == 5
+    assert payload["details"]["source"] == "dendro_native_checkpoint"
+    assert payload["details"]["observed_log_step"] == 0
+    assert payload["details"]["observed_checkpoint_step"] == 5
+    assert payload["details"]["checkpoint_generation"] == 0
+
+
+def test_dendro_progress_never_regresses_to_older_checkpoint(tmp_path) -> None:
+    registry = PersistentTaskRegistry(
+        definitions=[_native_progress_definition()],
+        state_root=tmp_path,
+        local_node_id="boston",
+    )
+    log = registry.task_directory("real-dendro") / "logs/process.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("Current Step: 0\n", encoding="utf-8")
+    directory = registry.checkpoint_directory("real-dendro")
+    directory.mkdir(parents=True, exist_ok=True)
+    _write_native_generation(directory, generation=0, step=5)
+
+    synchronizer = DendroProgressSynchronizer(registry)
+    assert synchronizer.refresh("real-dendro")
+    progress_path = registry.progress_file("real-dendro")
+    first = progress_path.read_text(encoding="utf-8")
+
+    for path in directory.glob("bssn_cp_0_*"):
+        path.unlink()
+    (directory / "bssn_cp_aeh_solver_checkpt-cp0.json").unlink()
+    _write_native_generation(directory, generation=1, step=3)
+
+    assert not synchronizer.refresh("real-dendro")
+    assert progress_path.read_text(encoding="utf-8") == first
+
+
+def test_dendro_progress_ignores_incomplete_newer_checkpoint(tmp_path) -> None:
+    registry = PersistentTaskRegistry(
+        definitions=[_native_progress_definition()],
+        state_root=tmp_path,
+        local_node_id="boston",
+    )
+    log = registry.task_directory("real-dendro") / "logs/process.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("Current Step: 0\n", encoding="utf-8")
+    directory = registry.checkpoint_directory("real-dendro")
+    directory.mkdir(parents=True, exist_ok=True)
+    _write_native_generation(directory, generation=0, step=3)
+    _write_native_generation(
+        directory, generation=1, step=7, complete=False
+    )
+
+    assert DendroProgressSynchronizer(registry).refresh("real-dendro")
+    payload = json.loads(
+        registry.progress_file("real-dendro").read_text(encoding="utf-8")
+    )
+    assert payload["completed_units"] == 3
+    assert payload["details"]["checkpoint_generation"] == 0
 
 
 def test_dendro_clean_exit_can_synthesize_completion_marker(tmp_path) -> None:

@@ -84,3 +84,9 @@ def test_stage4a2_run_idempotency_keys_are_fresh_per_execution() -> None:
     assert first.startswith("benchmark-nbody-small-short-run-")
     assert second.startswith("benchmark-nbody-small-short-run-")
     assert first != second
+
+
+def test_stage4a2_small_dendro_horizon_allows_post_zero_step_progress() -> None:
+    from scripts.run_stage4a2_calibration import DENDRO_VARIANTS
+
+    assert DENDRO_VARIANTS[0] == ("short", 8, 3.0)

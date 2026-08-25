@@ -38,9 +38,14 @@ power before forcing one production-path Magellan migration.
 
 Dendro-GR is measured at three parameter pairs:
 
-- `BSSN_MAXDEPTH=8`, `BSSN_RK_TIME_END=0.5` on the short regime,
+- `BSSN_MAXDEPTH=8`, `BSSN_RK_TIME_END=3.0` on the short regime,
 - `BSSN_MAXDEPTH=9`, `BSSN_RK_TIME_END=1.0` on the medium regime,
 - `BSSN_MAXDEPTH=10`, `BSSN_RK_TIME_END=2.0` on the long regime.
+
+The r8 horizon is intentionally long enough to produce post-zero-step native
+checkpoints on the final hardware; the earlier `0.5` horizon was shorter than
+the observed initial timestep and therefore could not support migration
+calibration.
 
 The real LLM workload uses one identical pre-staged `distilgpt2` snapshot and is
 migrated once on each WAN regime.  Model weights, tokenizer, AdamW optimizer
