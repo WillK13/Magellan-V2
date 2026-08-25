@@ -33,6 +33,7 @@
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpiexec",
           "mpirun",
           "python3",
           "rsync"
@@ -81,18 +82,22 @@
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpiexec",
+          "mpirun",
           "python3",
           "rsync"
         ],
         "runtimes": {
-          "python": "3.11"
+          "python": "3.11",
+          "openmpi": "4.1.4"
         },
         "features": [
-          "local-command",
-          "python-module",
-          "process-group",
           "application-checkpoint",
-          "dendro-adapter"
+          "dendro-adapter",
+          "local-command",
+          "mpi",
+          "process-group",
+          "python-module"
         ]
       },
       "machine_type": "e2-highmem-2"
@@ -126,18 +131,22 @@
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpiexec",
+          "mpirun",
           "python3",
           "rsync"
         ],
         "runtimes": {
-          "python": "3.11"
+          "python": "3.11",
+          "openmpi": "4.1.4"
         },
         "features": [
-          "local-command",
-          "python-module",
-          "process-group",
           "application-checkpoint",
-          "dendro-adapter"
+          "dendro-adapter",
+          "local-command",
+          "mpi",
+          "process-group",
+          "python-module"
         ]
       },
       "machine_type": "e2-highmem-2"
@@ -171,18 +180,22 @@
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpiexec",
+          "mpirun",
           "python3",
           "rsync"
         ],
         "runtimes": {
-          "python": "3.11"
+          "python": "3.11",
+          "openmpi": "4.1.4"
         },
         "features": [
-          "local-command",
-          "python-module",
-          "process-group",
           "application-checkpoint",
-          "dendro-adapter"
+          "dendro-adapter",
+          "local-command",
+          "mpi",
+          "process-group",
+          "python-module"
         ]
       },
       "machine_type": "e2-highmem-2"
@@ -216,18 +229,22 @@
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpiexec",
+          "mpirun",
           "python3",
           "rsync"
         ],
         "runtimes": {
-          "python": "3.11"
+          "python": "3.11",
+          "openmpi": "4.1.4"
         },
         "features": [
-          "local-command",
-          "python-module",
-          "process-group",
           "application-checkpoint",
-          "dendro-adapter"
+          "dendro-adapter",
+          "local-command",
+          "mpi",
+          "process-group",
+          "python-module"
         ]
       },
       "machine_type": "e2-highmem-2"
@@ -261,18 +278,22 @@
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpiexec",
+          "mpirun",
           "python3",
           "rsync"
         ],
         "runtimes": {
-          "python": "3.11"
+          "python": "3.11",
+          "openmpi": "4.1.4"
         },
         "features": [
-          "local-command",
-          "python-module",
-          "process-group",
           "application-checkpoint",
-          "dendro-adapter"
+          "dendro-adapter",
+          "local-command",
+          "mpi",
+          "process-group",
+          "python-module"
         ]
       },
       "machine_type": "e2-highmem-2"
@@ -306,6 +327,7 @@
         "accelerator_types": [],
         "commands": [
           "bash",
+          "mpiexec",
           "mpirun",
           "python3",
           "rsync"

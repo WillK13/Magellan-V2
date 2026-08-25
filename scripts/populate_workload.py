@@ -73,7 +73,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dendro-parameter-template", default=None)
     parser.add_argument("--dendro-resolutions", default="8,9,10")
     parser.add_argument("--dendro-time-ends", default="0.5,1.0,2.0")
-    parser.add_argument("--dendro-nodes", default="boston,virginia")
+    parser.add_argument(
+        "--dendro-nodes",
+        default=None,
+        help="Comma-separated eligible Dendro nodes; default is every cluster node",
+    )
 
     parser.add_argument("--llm-definition", default=None)
     parser.add_argument("--llm-nodes", default="boston,virginia")
@@ -123,7 +127,11 @@ def main() -> int:
         dendro_parameter_template=args.dendro_parameter_template,
         dendro_resolutions=parse_csv_ints(args.dendro_resolutions),
         dendro_time_ends=parse_csv_floats(args.dendro_time_ends),
-        dendro_nodes=parse_csv_strings(args.dendro_nodes),
+        dendro_nodes=(
+            parse_csv_strings(args.dendro_nodes)
+            if args.dendro_nodes is not None
+            else None
+        ),
         llm_template=llm_template,
         llm_nodes=parse_csv_strings(args.llm_nodes),
     )

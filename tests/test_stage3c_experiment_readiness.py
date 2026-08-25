@@ -249,3 +249,31 @@ def test_checkpointable_benchmark_resumes_and_completes(tmp_path) -> None:
     assert completion_payload["success"] is True
     assert result["benchmark"] == "json"
     assert result["iterations"] == 4
+
+
+def test_dendro_population_defaults_to_every_cluster_node() -> None:
+    cluster = _cluster()
+    template = json.loads(
+        Path("config/submissions/dendro-bssn-template.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    tasks = generate_population(
+        cluster=cluster,
+        count=8,
+        seed=19,
+        mix={"dendro": 1.0},
+        population_id="dendro-all-nodes",
+        dendro_template=template,
+        dendro_solver="/opt/dendro/bssnSolver",
+        dendro_parameter_template="/opt/dendro/q1.toml",
+        dendro_resolutions=[8],
+        dendro_time_ends=[0.5],
+    )
+    expected = {node.id for node in cluster.nodes}
+    assert tasks
+    assert all(
+        set(task.definition["profile"]["prestaged_node_ids"]) == expected
+        for task in tasks
+    )
+    assert {task.initial_node_id for task in tasks}.issubset(expected)

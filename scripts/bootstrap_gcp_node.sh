@@ -49,6 +49,26 @@ for command in git rsync ssh curl; do
   }
 done
 
+# Stage 4 uses all seven workers as valid MPI/Dendro destinations.  Keep the
+# runtime preinstalled rather than folding package installation into migration
+# time, which would contaminate the migration measurements.
+if ! command -v mpirun >/dev/null 2>&1 || ! command -v mpiexec >/dev/null 2>&1; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "OpenMPI 4.1.4 is required, but apt-get is unavailable" >&2
+    exit 1
+  fi
+  sudo -n apt-get update
+  sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    openmpi-bin libopenmpi-dev
+fi
+
+OPENMPI_BANNER="$(mpirun --version | head -n 1)"
+if [[ ! "$OPENMPI_BANNER" =~ 4\.1\.4([^0-9]|$) ]]; then
+  echo "OpenMPI 4.1.4 required; observed: $OPENMPI_BANNER" >&2
+  exit 1
+fi
+echo "openmpi $OPENMPI_BANNER"
+
 if [[ ! -d .venv ]]; then
   "$PYTHON_BIN" -m venv .venv
 fi

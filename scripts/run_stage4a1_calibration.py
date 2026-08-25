@@ -259,6 +259,8 @@ def main() -> int:
             f"mem={remote.get('memory_mb')}MB "
             f"commit={str(remote.get('git_commit'))[:8]}"
         )
+        for error in errors:
+            print(f"  - {error}")
 
     write_json(bundle / "hardware.json", hardware_by_node)
     write_csv(

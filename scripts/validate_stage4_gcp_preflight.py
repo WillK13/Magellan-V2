@@ -68,10 +68,11 @@ def main() -> None:
                 f"{node.compute_price_usd_per_hour}; expected {expected_price}"
             )
 
-    for node_id in ("boston", "virginia"):
+    for node_id in EXPECTED_PRICES:
         caps = nodes[node_id].capabilities
-        if "mpirun" not in caps.commands:
-            raise SystemExit(f"{node_id}: mpirun is not configured")
+        for command in ("mpirun", "mpiexec"):
+            if command not in caps.commands:
+                raise SystemExit(f"{node_id}: {command} is not configured")
         if "mpi" not in caps.features:
             raise SystemExit(f"{node_id}: mpi feature is not configured")
         if caps.runtimes.get("openmpi") != "4.1.4":

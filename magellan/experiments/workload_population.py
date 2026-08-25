@@ -277,9 +277,9 @@ def generate_population(
     if "llm" in mix and llm_template is None:
         raise ValueError("LLM population requires an LLM definition template")
 
-    d_nodes = dendro_nodes or [
-        node_id for node_id in ("boston", "virginia") if node_id in cluster_ids
-    ]
+    # Stage 4 pre-stages the Dendro runtime on every experiment node, so
+    # Dendro populations should be geographically unrestricted by default.
+    d_nodes = dendro_nodes or list(cluster_ids)
     l_nodes = llm_nodes or [
         node_id for node_id in ("boston", "virginia") if node_id in cluster_ids
     ]
