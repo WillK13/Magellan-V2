@@ -130,3 +130,10 @@ edge table and records resource profiles plus real checkpoint/transfer/restore
 measurements for benchmark, Dendro, and LLM workloads.  Validate the resulting
 parent bundle with `scripts/validate_stage4a2_calibration.py` before using it as
 an input to baseline comparisons.
+
+### Stage 4A.3 workload resource profiles
+
+Use `scripts/run_stage4a3_profiles.py` after Stage 4A.2 and after validating
+workload-session telemetry for MPI/Dendro. The campaign is profile-only: it does
+not perform migrations and therefore does not replace or modify the canonical
+Stage 4A.2 bundle.

@@ -127,6 +127,7 @@ def _numeric_samples(rows: Iterable[dict[str, Any]], field: str) -> list[float]:
 def summarize_profile_samples(rows: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {"sample_count": len(rows)}
     for field in (
+        "process_count",
         "cpu_utilization_percent",
         "memory_rss_mb",
         "checkpoint_bytes",

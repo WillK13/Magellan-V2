@@ -90,6 +90,8 @@ def test_stage4a2_small_dendro_horizon_allows_post_zero_step_progress() -> None:
     from scripts.run_stage4a2_calibration import DENDRO_VARIANTS
 
     assert DENDRO_VARIANTS[0] == ("short", 8, 3.0)
+    runner = Path("scripts/run_stage4a2_calibration.py").read_text(encoding="utf-8")
+    assert "resolution/time pairs (8,3.0), (9,1.0), (10,2.0)" in runner
 
 
 def test_stage4a2_measurements_are_operator_only_for_background_scheduler() -> None:

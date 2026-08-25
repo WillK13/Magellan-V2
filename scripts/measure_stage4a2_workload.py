@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolution", type=int, default=9)
     parser.add_argument("--time-end", type=float, default=1.0)
     parser.add_argument("--profile-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--profile-only",
+        action="store_true",
+        help="Collect the pre-migration workload profile and stop without migrating.",
+    )
     parser.add_argument("--sample-interval-seconds", type=float, default=5.0)
     parser.add_argument("--minimum-progress", type=float, default=1.0)
     parser.add_argument("--timeout-seconds", type=float, default=1800.0)
@@ -192,6 +197,8 @@ def profile_task(
                 "telemetry_sample_count": telemetry.get("sample_count"),
                 "progress_completed_units": state.get("progress_completed_units"),
                 "progress_total_units": state.get("progress_total_units"),
+                "process_count": telemetry.get("process_count"),
+                "process_state": telemetry.get("process_state"),
                 "cpu_utilization_percent": telemetry.get("cpu_utilization_percent"),
                 "memory_rss_mb": telemetry.get("memory_rss_mb"),
                 "checkpoint_bytes": telemetry.get("checkpoint_bytes"),
@@ -322,6 +329,50 @@ def main() -> int:
             timeout_seconds=args.timeout_seconds,
         )
         progress_before = float(profile_state.get("progress_completed_units") or 0.0)
+        if args.profile_only:
+            write_csv(bundle / "profile_samples.csv", samples, list(samples[0].keys()))
+            profile_summary = summarize_profile_samples(samples)
+            summary = {
+                "measurement_id": measurement_id,
+                "workload": workload_label,
+                "variant": variant,
+                "source_node_id": args.source,
+                "run_id": run_id,
+                "profile": profile_summary,
+                "profile_only": True,
+                "passed": True,
+            }
+            metadata = {
+                "format_version": 1,
+                "measurement_type": "stage4a3_workload_profile",
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "measurement_id": measurement_id,
+                "workload": workload_label,
+                "variant": variant,
+                "source_node_id": args.source,
+                "profile_seconds": args.profile_seconds,
+                "sample_interval_seconds": args.sample_interval_seconds,
+                "preflight": preflight,
+                "definition": definition,
+                "created_definition": created,
+                "run": run_view,
+                "methodology": {
+                    "profile_mode": (
+                        "Profile a scheduler-isolated workload on one final-hardware node, "
+                        "then stop it without migration. Resource telemetry is workload-session "
+                        "aggregate CPU/RSS plus the configured utilization-based power model."
+                    )
+                },
+            }
+            write_json(bundle / "metadata.json", metadata)
+            write_json(bundle / "summary.json", summary)
+            write_checksums(bundle)
+            print("STAGE_4A3_PROFILE_MEASUREMENT_PASS")
+            print(f"bundle: {bundle}")
+            print(f"run_id: {run_id}")
+            print(f"samples: {len(samples)}")
+            return 0
+
         edge_before = request_json(f"{source_api}/telemetry/edges/{args.destination}/refresh", method="POST", timeout=120)
         event_status = request_json(f"{source_api}/experiment/events/status")
         event_start = int(event_status.get("last_sequence", 0))

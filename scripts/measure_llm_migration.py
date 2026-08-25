@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional pre-migration telemetry profile window per hop.",
     )
     parser.add_argument(
+        "--profile-only",
+        action="store_true",
+        help="Collect the initial-node workload profile and stop without migrating.",
+    )
+    parser.add_argument(
         "--profile-sample-interval-seconds",
         type=float,
         default=5.0,
@@ -458,6 +463,8 @@ def collect_profile_samples(
                 "sampled_at_utc": datetime.now(timezone.utc).isoformat(),
                 "progress_completed_units": progress.get("completed_units"),
                 "progress_total_units": progress.get("total_units"),
+                "process_count": telemetry.get("process_count"),
+                "process_state": telemetry.get("process_state"),
                 "cpu_utilization_percent": telemetry.get("cpu_utilization_percent"),
                 "memory_rss_mb": telemetry.get("memory_rss_mb"),
                 "checkpoint_bytes": telemetry.get("checkpoint_bytes"),
@@ -780,6 +787,68 @@ def main() -> int:
                 hop=hop_index,
             )
         )
+
+        if args.profile_only:
+            try:
+                request_json(
+                    f"{source_api}/tasks/{run_id}/stop",
+                    method="POST",
+                    timeout=args.timeout_seconds,
+                )
+            except Exception as exc:
+                print(f"[WARN] profile-only task stop failed: {type(exc).__name__}: {exc}")
+            if profile_samples:
+                write_csv(
+                    bundle / "profile_samples.csv",
+                    profile_samples,
+                    list(profile_samples[0].keys()),
+                )
+            profile_summary = summarize_profile_samples(profile_samples)
+            summary = {
+                "measurement_id": measurement_id,
+                "model": args.model,
+                "workload": "llm",
+                "variant": args.model,
+                "source_node_id": source_id,
+                "run_id": run_id,
+                "profile": profile_summary,
+                "profile_only": True,
+                "passed": bool(profile_samples),
+            }
+            metadata = {
+                "format_version": 1,
+                "measurement_type": "stage4a3_workload_profile",
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "measurement_id": measurement_id,
+                "model": args.model,
+                "source_node_id": source_id,
+                "profile_seconds": args.profile_seconds,
+                "profile_sample_interval_seconds": args.profile_sample_interval_seconds,
+                "health": health,
+                "dependencies": dependencies,
+                "disk_before": disk_before,
+                "definition": definition,
+                "created_definition": created,
+                "run": run_view,
+                "periodic_checkpoint": periodic_checkpoint,
+                "methodology": {
+                    "profile_mode": (
+                        "Profile a scheduler-isolated real LLM training process on the initial "
+                        "final-hardware node, retain application checkpoint telemetry, then stop "
+                        "without migration."
+                    )
+                },
+            }
+            write_json(bundle / "metadata.json", metadata)
+            write_json(bundle / "summary.json", summary)
+            write_checksums(bundle)
+            if not summary["passed"]:
+                raise RuntimeError("LLM profile-only run produced no telemetry samples")
+            print("STAGE_4A3_PROFILE_MEASUREMENT_PASS")
+            print(f"bundle: {bundle}")
+            print(f"run_id: {run_id}")
+            print(f"samples: {len(profile_samples)}")
+            return 0
 
         required_free = checkpoint_bytes * 2 + 512 * MIB
         for node in (source, destination):

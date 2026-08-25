@@ -296,7 +296,7 @@ def main() -> int:
                 "medium=directed edge nearest the Stage-4A.1 median bandwidth"
             ),
             "benchmark_matrix": "nbody/json/matmul x small/medium/large, with size mapped to short/medium/long WAN regime",
-            "dendro_matrix": "resolution/time pairs (8,0.5), (9,1.0), (10,2.0) mapped to short/medium/long WAN regimes",
+            "dendro_matrix": "resolution/time pairs (8,3.0), (9,1.0), (10,2.0) mapped to short/medium/long WAN regimes",
             "llm_matrix": "same pre-staged distilgpt2 snapshot migrated once on each WAN regime",
             "accuracy_policy": "All observed prediction errors are retained; no accuracy threshold drops a sample.",
         },
