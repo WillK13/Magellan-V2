@@ -42,8 +42,7 @@ class TaskProfile(BaseModel):
     last_migration_at: datetime | None = None
     last_pause_at: datetime | None = None
 
-    # Carried with task bids. The current slot arbiter does not yet enforce
-    # these fields; the resource-aware auction milestone will.
+    # Carried with task bids and enforced by the destination arbiter.
     priority: int = Field(default=0, ge=0, le=100)
     deadline_at_utc: datetime | None = None
     resource_request: TaskResourceRequest = Field(

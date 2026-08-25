@@ -169,6 +169,15 @@ async def health() -> dict:
         "resource_capacity": auction_status[
             "resource_capacity"
         ],
+        "reserved_cpu_cores": auction_status["reserved_cpu_cores"],
+        "reserved_memory_mb": auction_status["reserved_memory_mb"],
+        "reserved_gpu_count": auction_status["reserved_gpu_count"],
+        "resource_busy_fraction": auction_status[
+            "resource_busy_fraction"
+        ],
+        "available_cpu_cores": auction_status["available_cpu_cores"],
+        "available_memory_mb": auction_status["available_memory_mb"],
+        "available_gpu_count": auction_status["available_gpu_count"],
         "owned_task_count": context.registry.count_owned(
             context.local_node.id
         ),

@@ -17,6 +17,7 @@ from magellan.bidding.models import (
 from magellan.bidding.ranking import rank_bids
 from magellan.bidding.resources import (
     ResourceLedger,
+    resource_busy_fraction,
     sum_requests,
 )
 from magellan.bidding.store import BidStore
@@ -50,7 +51,7 @@ class BidArbiter:
         store: BidStore,
         registry: CapacityRegistry,
         local_node_id: str,
-        capacity: int,
+        capacity: int | None,
         bid_window_seconds: float,
         node_resources: NodeResourceCapacity | None = None,
         auction_policy: AuctionPolicy | None = None,
@@ -94,29 +95,43 @@ class BidArbiter:
 
     async def _available_resources(
         self,
-    ) -> tuple[int, ResourceLedger]:
+    ) -> tuple[int | None, ResourceLedger, dict[str, float | int]]:
         currently_owned = self._registry.count_owned(
             self._local_node_id
         )
         reservations = await self._store.active_reservations()
-        available_slots = max(
-            0,
-            self._capacity
-            - currently_owned
-            - len(reservations),
+        available_slots = (
+            None
+            if self._capacity is None
+            else max(
+                0,
+                self._capacity
+                - currently_owned
+                - len(reservations),
+            )
         )
         used_requests = self._owned_requests() + [
             self._request(record)
             for record in reservations
         ]
+        used = sum_requests(used_requests)
         ledger = ResourceLedger.from_capacity(
             self._node_resources,
-            used=sum_requests(used_requests),
+            used=used,
         )
-        return available_slots, ledger
+        usage = {
+            "reserved_cpu_cores": used.cpu_cores,
+            "reserved_memory_mb": used.memory_mb,
+            "reserved_gpu_count": used.gpu_count,
+            "resource_busy_fraction": resource_busy_fraction(
+                used,
+                self._node_resources,
+            ),
+        }
+        return available_slots, ledger, usage
 
     async def status(self) -> dict:
-        available_slots, ledger = await self._available_resources()
+        available_slots, ledger, usage = await self._available_resources()
         return {
             "node_id": self._local_node_id,
             "strategy": self._strategy.value,
@@ -128,6 +143,7 @@ class BidArbiter:
             "runtime_capabilities": self._node_capabilities.model_dump(
                 mode="json"
             ),
+            **usage,
             **ledger.snapshot(),
             "credits": await self._store.credits_snapshot(),
         }
@@ -173,7 +189,7 @@ class BidArbiter:
             policy=self._auction_policy,
             now_utc=now,
         )
-        available_slots, ledger = await self._available_resources()
+        available_slots, ledger, _usage = await self._available_resources()
         full_ledger = ResourceLedger.from_capacity(
             self._node_resources
         )
@@ -213,7 +229,7 @@ class BidArbiter:
                     "Task resource request is incompatible with "
                     "destination capacity"
                 )
-            elif available_slots <= 0:
+            elif available_slots is not None and available_slots <= 0:
                 reason = (
                     "Destination task slots are already owned or reserved"
                 )
@@ -223,6 +239,7 @@ class BidArbiter:
                     request
                 )
                 if not fits_remaining:
+                    resource_fit = False
                     reason = contention_reason or (
                         "Destination resources are already owned or reserved"
                     )
@@ -233,7 +250,8 @@ class BidArbiter:
                         f"Selected by {self._strategy.value} task auction; "
                         "destination resources are reserved"
                     )
-                    available_slots -= 1
+                    if available_slots is not None:
+                        available_slots -= 1
                     ledger.consume(request)
                     accepted_ids.add(bid.bid_id)
                     selected_task_ids.add(bid.task_id)

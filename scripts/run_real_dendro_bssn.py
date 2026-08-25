@@ -22,6 +22,7 @@ def render_runtime_parameters(
     checkpoint_directory: Path,
     output_directory: Path,
     resume: bool,
+    overrides: dict[str, str] | None = None,
 ) -> Path:
     text = template_path.read_text(encoding="utf-8")
     checkpoint_prefix = checkpoint_directory / "bssn_cp"
@@ -42,6 +43,15 @@ def render_runtime_parameters(
         "BSSN_PROFILE_FILE_PREFIX": repr(str(profile_prefix)),
         "AEH_SAVE_DIR": repr(str(aeh_directory)),
     }
+    managed_keys = set(replacements)
+    for key, value in (overrides or {}).items():
+        if key in managed_keys:
+            raise ValueError(
+                f"Dendro override {key} is managed by Magellan and cannot be changed"
+            )
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", key) is None:
+            raise ValueError(f"Unsafe Dendro parameter key: {key}")
+        text = _replace_toml_value(text, key, value)
     for key, value in replacements.items():
         text = _replace_toml_value(text, key, value)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +67,46 @@ def main() -> int:
     parser.add_argument("parameter_template")
     parser.add_argument("--world-size", type=int, default=2)
     parser.add_argument("--ts-mode", default="1")
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=None,
+        help="Override BSSN_MAXDEPTH for this run",
+    )
+    parser.add_argument(
+        "--time-end",
+        type=float,
+        default=None,
+        help="Override BSSN_RK_TIME_END for this run",
+    )
+    parser.add_argument(
+        "--set",
+        dest="parameter_overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Additional raw TOML scalar override; may be repeated",
+    )
     args = parser.parse_args()
+
+    overrides: dict[str, str] = {}
+    for raw in args.parameter_overrides:
+        if "=" not in raw:
+            raise ValueError(f"Invalid --set value {raw!r}; expected KEY=VALUE")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            raise ValueError(f"Invalid --set value {raw!r}; expected KEY=VALUE")
+        overrides[key] = value
+    if args.resolution is not None:
+        if args.resolution < 1:
+            raise ValueError("--resolution must be positive")
+        overrides["BSSN_MAXDEPTH"] = str(args.resolution)
+    if args.time_end is not None:
+        if args.time_end <= 0:
+            raise ValueError("--time-end must be positive")
+        overrides["BSSN_RK_TIME_END"] = repr(args.time_end)
 
     checkpoint_directory = Path(
         os.environ["MAGELLAN_DENDRO_CHECKPOINT_DIRECTORY"]
@@ -72,6 +121,7 @@ def main() -> int:
         checkpoint_directory=checkpoint_directory,
         output_directory=output_directory,
         resume=resume,
+        overrides=overrides,
     )
     command = [
         "mpirun",

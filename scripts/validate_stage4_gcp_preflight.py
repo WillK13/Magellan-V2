@@ -43,6 +43,11 @@ def main() -> None:
                 f"{node_id}: machine_type={node.machine_type!r}; "
                 f"expected {EXPECTED_MACHINE_TYPE!r}"
             )
+        if node.capacity is not None:
+            raise SystemExit(
+                f"{node_id}: capacity={node.capacity}; expected null for "
+                "resource-only admission"
+            )
         if node.resources.cpu_cores != 2:
             raise SystemExit(
                 f"{node_id}: resources.cpu_cores={node.resources.cpu_cores}; expected 2"

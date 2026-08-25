@@ -148,3 +148,23 @@ def dominant_resource_share(
         return max(float(request.cpu_cores), 1.0)
 
     return max(shares)
+
+
+def resource_busy_fraction(
+    used: ResourceVector,
+    capacity: NodeResourceCapacity,
+) -> float:
+    """Return dominant reserved-resource utilization for a node.
+
+    This is based on task declarations/reservations rather than instantaneous
+    CPU usage, so admission remains deterministic and stable. Resources with
+    no configured limit are ignored.
+    """
+    shares: list[float] = []
+    if capacity.cpu_cores is not None:
+        shares.append(used.cpu_cores / capacity.cpu_cores)
+    if capacity.memory_mb is not None:
+        shares.append(used.memory_mb / capacity.memory_mb)
+    if capacity.gpu_count is not None and capacity.gpu_count > 0:
+        shares.append(used.gpu_count / capacity.gpu_count)
+    return max(shares, default=0.0)

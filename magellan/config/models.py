@@ -50,7 +50,9 @@ class NodeConfig(BaseModel):
     longitude: float = Field(ge=-180, le=180)
 
     # Site properties
-    capacity: int = Field(default=1, ge=1)
+    # Optional safety cap on task count. ``None`` makes admission purely
+    # resource-vector based, which is the production GCP experiment mode.
+    capacity: int | None = Field(default=1, ge=1)
     resources: NodeResourceCapacity = Field(
         default_factory=NodeResourceCapacity
     )

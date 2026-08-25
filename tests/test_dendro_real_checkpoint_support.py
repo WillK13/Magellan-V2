@@ -273,3 +273,36 @@ def test_dendro_log_parser_does_not_cross_lines_into_timestamp(tmp_path) -> None
         registry.progress_file("real-dendro").read_text(encoding="utf-8")
     )
     assert payload["completed_units"] == 13
+
+
+def test_real_bssn_launcher_applies_resolution_and_time_overrides(tmp_path) -> None:
+    from scripts.run_real_dendro_bssn import render_runtime_parameters
+
+    template = tmp_path / "template.toml"
+    template.write_text(
+        "BSSN_RESTORE_SOLVER = 0\n"
+        'BSSN_CHKPT_FILE_PREFIX = "cp/bssn_cp"\n'
+        'BSSN_VTU_FILE_PREFIX = "vtu/bssn_gr"\n'
+        'BSSN_PROFILE_FILE_PREFIX = "dat/dgr"\n'
+        'AEH_SAVE_DIR = "aeh"\n'
+        "BSSN_MAXDEPTH = 8\n"
+        "BSSN_RK_TIME_END = 1.0\n",
+        encoding="utf-8",
+    )
+    checkpoint = tmp_path / "task" / "checkpoint"
+    output = tmp_path / "task" / "output"
+    rendered = render_runtime_parameters(
+        template_path=template,
+        output_path=tmp_path / "task" / "runtime.toml",
+        checkpoint_directory=checkpoint,
+        output_directory=output,
+        resume=False,
+        overrides={
+            "BSSN_MAXDEPTH": "10",
+            "BSSN_RK_TIME_END": "2.5",
+        },
+    )
+    text = rendered.read_text(encoding="utf-8")
+    assert "BSSN_MAXDEPTH = 10" in text
+    assert "BSSN_RK_TIME_END = 2.5" in text
+    assert "BSSN_RESTORE_SOLVER = 0" in text
