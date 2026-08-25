@@ -14,11 +14,13 @@ def stat_line(
     stime: int,
     rss_pages: int,
     state: str = "R",
+    session_id: int | None = None,
 ) -> str:
     fields = ["0"] * 22
     fields[0] = state
     fields[1] = "1"  # ppid
     fields[2] = str(process_group)
+    fields[3] = str(process_group if session_id is None else session_id)
     fields[11] = str(utime)
     fields[12] = str(stime)
     fields[21] = str(rss_pages)
@@ -31,10 +33,11 @@ def write_stat(root: Path, pid: int, content: str) -> None:
     (path / "stat").write_text(content, encoding="utf-8")
 
 
-def test_procfs_sampler_aggregates_process_group(tmp_path) -> None:
-    write_stat(tmp_path, 100, stat_line(100, 100, 100, 50, 10))
-    write_stat(tmp_path, 101, stat_line(101, 100, 50, 25, 5, "S"))
-    write_stat(tmp_path, 200, stat_line(200, 200, 900, 100, 100))
+def test_procfs_sampler_aggregates_workload_session(tmp_path) -> None:
+    write_stat(tmp_path, 100, stat_line(100, 100, 100, 50, 10, session_id=100))
+    # MPI-style child: same session as the workload leader, different PGID.
+    write_stat(tmp_path, 101, stat_line(101, 101, 50, 25, 5, "S", session_id=100))
+    write_stat(tmp_path, 200, stat_line(200, 200, 900, 100, 100, session_id=200))
 
     sampler = ProcfsProcessSampler(tmp_path)
     sample = sampler.sample(100)

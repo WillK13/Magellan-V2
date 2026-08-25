@@ -11,11 +11,12 @@ class ProcfsUnavailableError(RuntimeError):
 
 
 class ProcfsProcessSampler:
-    """Read aggregate process-group CPU and RSS from Linux procfs.
+    """Read aggregate workload-session CPU and RSS from Linux procfs.
 
     Magellan starts each workload in a new session, making the leader PID the
-    process-group ID. Aggregating the group accounts for child workers without
-    requiring an optional third-party dependency.
+    session ID. Descendants may create their own process groups (for example,
+    MPI ranks launched by OpenMPI), so aggregate by session rather than only
+    the leader's process group.
     """
 
     def __init__(self, proc_root: str | Path = "/proc") -> None:
@@ -27,23 +28,24 @@ class ProcfsProcessSampler:
             raise ProcfsUnavailableError(str(exc)) from exc
 
     @staticmethod
-    def _parse_stat(raw: str) -> tuple[int, str, int, float, int]:
+    def _parse_stat(raw: str) -> tuple[int, str, int, int, float, int]:
         left = raw.find("(")
         right = raw.rfind(")")
         if left <= 0 or right <= left:
             raise ValueError("Malformed /proc stat record")
         pid = int(raw[:left].strip())
         fields = raw[right + 2 :].split()
-        # fields[0] is state; fields[2] is process group; utime/stime are
-        # original fields 14/15, represented here by indexes 11/12. RSS is
-        # original field 24, represented by index 21.
+        # fields[0] is state; fields[2] is process group; fields[3] is session;
+        # utime/stime are original fields 14/15, represented here by indexes
+        # 11/12. RSS is original field 24, represented by index 21.
         state = fields[0]
         process_group = int(fields[2])
+        session_id = int(fields[3])
         cpu_ticks = float(fields[11]) + float(fields[12])
         rss_pages = int(fields[21])
-        return pid, state, process_group, cpu_ticks, rss_pages
+        return pid, state, process_group, session_id, cpu_ticks, rss_pages
 
-    def sample(self, process_group_id: int) -> ProcessMeasurement:
+    def sample(self, session_id: int) -> ProcessMeasurement:
         if not self._proc_root.is_dir():
             raise ProcfsUnavailableError(
                 f"procfs is unavailable at {self._proc_root}"
@@ -63,20 +65,20 @@ class ProcfsProcessSampler:
                 )
             except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
                 continue
-            pid, state, process_group, item_ticks, item_rss = parsed
-            if process_group != process_group_id:
+            pid, state, _process_group, process_session, item_ticks, item_rss = parsed
+            if process_session != session_id:
                 continue
             process_count += 1
             cpu_ticks += item_ticks
             rss_pages += max(0, item_rss)
-            if pid == process_group_id:
+            if pid == session_id:
                 leader_state = state
 
         if process_count == 0:
-            raise ProcessLookupError(process_group_id)
+            raise ProcessLookupError(session_id)
 
         return ProcessMeasurement(
-            pid=process_group_id,
+            pid=session_id,
             process_count=process_count,
             process_state=leader_state,
             cpu_time_seconds=cpu_ticks / self._clock_ticks,
