@@ -119,3 +119,14 @@ all topology-derived directed edges with repeated held-out samples. Hardware,
 raw network evidence, global descriptive statistics, and checksums are preserved
 under one `stage4a1-*` measurement bundle. Validate it with
 `scripts/validate_stage4a1_calibration.py` before beginning workload calibration.
+
+## Stage 4A.2 workload and migration calibration
+
+After Stage 4A.1 has produced a checksum-valid seven-node WAN bundle, use
+`scripts/provision_llm_all_gcp_nodes.py` to pre-stage one identical local LLM
+snapshot across the cluster, then run `scripts/run_stage4a2_calibration.py`.
+The campaign selects short/medium/long WAN regimes from the Stage 4A.1 measured
+edge table and records resource profiles plus real checkpoint/transfer/restore
+measurements for benchmark, Dendro, and LLM workloads.  Validate the resulting
+parent bundle with `scripts/validate_stage4a2_calibration.py` before using it as
+an input to baseline comparisons.

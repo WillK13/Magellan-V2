@@ -52,14 +52,23 @@ done
 # Stage 4 uses all seven workers as valid MPI/Dendro destinations.  Keep the
 # runtime preinstalled rather than folding package installation into migration
 # time, which would contaminate the migration measurements.
+NEED_DENDRO_PACKAGES=0
 if ! command -v mpirun >/dev/null 2>&1 || ! command -v mpiexec >/dev/null 2>&1; then
+  NEED_DENDRO_PACKAGES=1
+fi
+for package in libgsl27 libopenblas0-pthread; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'ok installed'; then
+    NEED_DENDRO_PACKAGES=1
+  fi
+done
+if [[ "$NEED_DENDRO_PACKAGES" -eq 1 ]]; then
   if ! command -v apt-get >/dev/null 2>&1; then
-    echo "OpenMPI 4.1.4 is required, but apt-get is unavailable" >&2
+    echo "Dendro/OpenMPI runtime packages are required, but apt-get is unavailable" >&2
     exit 1
   fi
   sudo -n apt-get update
   sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    openmpi-bin libopenmpi-dev
+    openmpi-bin libopenmpi-dev libgsl27 libopenblas0-pthread
 fi
 
 OPENMPI_BANNER="$(mpirun --version | head -n 1)"

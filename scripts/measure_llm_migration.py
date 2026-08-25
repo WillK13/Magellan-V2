@@ -23,6 +23,7 @@ from magellan.experiments.llm_validation import (
     last_checkpoint_event,
 )
 from magellan.experiments.measurement import absolute_percent_error, signed_percent_error
+from magellan.experiments.stage4a2 import summarize_profile_samples
 
 
 MIB = 1024 * 1024
@@ -64,6 +65,17 @@ def parse_args() -> argparse.Namespace:
         help="Minimum free disk required on every node in the validation path.",
     )
     parser.add_argument("--poll-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--profile-seconds",
+        type=float,
+        default=0.0,
+        help="Optional pre-migration telemetry profile window per hop.",
+    )
+    parser.add_argument(
+        "--profile-sample-interval-seconds",
+        type=float,
+        default=5.0,
+    )
     parser.add_argument("--measurements-root", default="experiments/measurements")
     parser.add_argument("--measurement-id", default=None)
     parser.add_argument("--expected-carbon-metric", default="lifecycle")
@@ -413,6 +425,55 @@ def wait_checkpointed_progress(
     )
 
 
+def collect_profile_samples(
+    *,
+    args: argparse.Namespace,
+    node: Any,
+    api: str,
+    run_id: str,
+    hop: int,
+) -> list[dict[str, Any]]:
+    if args.profile_seconds <= 0:
+        return []
+    samples: list[dict[str, Any]] = []
+    last_telemetry_sample_at: str | None = None
+    deadline = time.monotonic() + args.profile_seconds
+    while time.monotonic() < deadline:
+        state = task_state(api, run_id)
+        if state is None or state.get("status") != "running":
+            raise RuntimeError(f"LLM left RUNNING during profile window: {state}")
+        telemetry = request_json(f"{api}/telemetry/tasks/{run_id}")
+        telemetry_sample_at = telemetry.get("last_sample_at_utc")
+        if telemetry_sample_at == last_telemetry_sample_at:
+            time.sleep(min(args.profile_sample_interval_seconds, 1.0))
+            continue
+        last_telemetry_sample_at = telemetry_sample_at
+        progress = read_progress(args=args, node=node, run_id=run_id) or {}
+        samples.append(
+            {
+                "hop": hop,
+                "telemetry_last_sample_at_utc": telemetry_sample_at,
+                "telemetry_sample_count": telemetry.get("sample_count"),
+                "node_id": node.id,
+                "sampled_at_utc": datetime.now(timezone.utc).isoformat(),
+                "progress_completed_units": progress.get("completed_units"),
+                "progress_total_units": progress.get("total_units"),
+                "cpu_utilization_percent": telemetry.get("cpu_utilization_percent"),
+                "memory_rss_mb": telemetry.get("memory_rss_mb"),
+                "checkpoint_bytes": telemetry.get("checkpoint_bytes"),
+                "measured_power_kw": telemetry.get("measured_power_kw"),
+                "power_source": telemetry.get("power_source"),
+                "power_confidence": telemetry.get("power_confidence"),
+                "progress_rate_units_per_second": telemetry.get("progress_rate_units_per_second"),
+                "estimated_remaining_seconds": telemetry.get("estimated_remaining_seconds"),
+                "telemetry_freshness": telemetry.get("freshness"),
+                "telemetry_age_seconds": telemetry.get("age_seconds"),
+            }
+        )
+        time.sleep(args.profile_sample_interval_seconds)
+    return samples
+
+
 def wait_resumed_progress(
     *,
     args: argparse.Namespace,
@@ -561,6 +622,8 @@ def main() -> int:
         raise ValueError("LLM migration validation requires --checkpoint-every >= 1")
     if args.minimum_free_gib <= 0:
         raise ValueError("--minimum-free-gib must be positive")
+    if args.profile_seconds < 0 or args.profile_sample_interval_seconds <= 0:
+        raise ValueError("LLM profile intervals must be non-negative/positive")
 
     path = parse_path(args.path)
     cluster = load_cluster_config(args.cluster)
@@ -685,6 +748,7 @@ def main() -> int:
 
     (bundle / "raw").mkdir(parents=True)
     rows: list[dict[str, Any]] = []
+    profile_samples: list[dict[str, Any]] = []
     current_minimum_step = args.migrate_after_step
 
     for hop_index, (source_id, destination_id) in enumerate(
@@ -705,6 +769,16 @@ def main() -> int:
         checkpoint_bytes = int(task_telemetry.get("checkpoint_bytes") or 0)
         if checkpoint_bytes <= 0:
             raise RuntimeError("LLM task telemetry did not expose checkpoint size")
+
+        profile_samples.extend(
+            collect_profile_samples(
+                args=args,
+                node=source,
+                api=source_api,
+                run_id=run_id,
+                hop=hop_index,
+            )
+        )
 
         required_free = checkpoint_bytes * 2 + 512 * MIB
         for node in (source, destination):
@@ -909,6 +983,12 @@ def main() -> int:
 
     fieldnames = list(rows[0]) if rows else []
     write_csv(bundle / "llm_migrations.csv", rows, fieldnames)
+    if profile_samples:
+        write_csv(
+            bundle / "profile_samples.csv",
+            profile_samples,
+            list(profile_samples[0].keys()),
+        )
 
     calibrated = [
         row
@@ -966,6 +1046,7 @@ def main() -> int:
         "calibrated_downtime_ape_median_pct": (
             median(downtime_apes) if downtime_apes else None
         ),
+        "profile": summarize_profile_samples(profile_samples),
         "passed": bool(rows)
         and all(bool(row["resume_validation_passed"]) for row in rows),
     }
@@ -980,6 +1061,8 @@ def main() -> int:
         "migrate_after_step": args.migrate_after_step,
         "steps_between_migrations": args.steps_between_migrations,
         "post_path_steps": args.post_path_steps,
+        "profile_seconds": args.profile_seconds,
+        "profile_sample_interval_seconds": args.profile_sample_interval_seconds,
         "carbon_metric": args.expected_carbon_metric,
         "state_root": args.state_root,
         "health": health,
