@@ -82,7 +82,7 @@ if [ -n "$missing" ]; then
 fi
 
 # Exercise two local MPI ranks without starting Dendro itself.
-rank_count=$(mpirun -np 2 hostname | wc -l)
+rank_count=$(mpirun --use-hwthread-cpus -np 2 hostname | wc -l)
 [ "$rank_count" -eq 2 ]
 
 printf 'solver_sha256='
