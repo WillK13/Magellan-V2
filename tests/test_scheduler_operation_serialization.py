@@ -218,3 +218,91 @@ async def test_operator_migration_is_idempotent_when_scheduler_wins_race(
     assert result["migrated"] is True
     assert result["already_migrated"] is True
     assert result["state"]["owner_node_id"] == "virginia"
+
+
+class OperatorOnlyCatalog:
+    def get_run(self, _task_id):
+        return SimpleNamespace(labels={"scheduler_mode": "operator_only"})
+
+
+@pytest.mark.asyncio
+async def test_background_scheduler_skips_operator_only_run(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    boston = NodeConfig(
+        id="boston",
+        name="Boston",
+        vm_name="boston",
+        zone="us-east1-c",
+        internal_ip="10.0.0.1",
+        carbon_region="Boston",
+        dataset_file="unused.csv",
+        latitude=42,
+        longitude=-71,
+    )
+    cluster = ClusterConfig(nodes=[boston], epoch_seconds=30)
+    policy = ScoringPolicy(
+        horizon_seconds=60,
+        weights=ObjectiveWeights(time=1, carbon=1, cost=1),
+        pause=PausePolicy(
+            pause_seconds=0,
+            idle_seconds=30,
+            resume_seconds=0,
+            max_pause_window_seconds=120,
+        ),
+        migration=MigrationPolicy(
+            min_migration_gap_seconds=0,
+            required_improvement_fraction=0,
+        ),
+        clock=ClockPolicy(mode="wall"),
+    )
+    definition = TaskDefinition(
+        profile=TaskProfile(
+            task_id="operator-only-task",
+            workload_type="test",
+            current_node_id="boston",
+            power_kw=0.1,
+            checkpoint_bytes=10,
+        ),
+        runtime=LocalProcessSpec(module="example.module"),
+    )
+    registry = PersistentTaskRegistry(
+        definitions=[definition],
+        state_root=tmp_path,
+        local_node_id="boston",
+    )
+    registry.mark_running("operator-only-task", os.getpid())
+
+    called = False
+
+    async def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    service = SchedulerService(
+        local_node=boston,
+        cluster=cluster,
+        policy=policy,
+        graph=ClusterGraph(cluster),
+        carbon_store=object(),
+        clock=object(),
+        registry=registry,
+        runtime=object(),
+        bid_client=object(),
+        migration_service=object(),
+        checkpoint_manager=object(),
+        prefetch_service=object(),
+        broadcaster=object(),
+        pause_service=object(),
+        accounting_service=NoopAccounting(),
+        task_catalog=OperatorOnlyCatalog(),
+    )
+    monkeypatch.setattr(service, "_evaluate_task_locked", forbidden)
+
+    await service._evaluate_task(
+        "operator-only-task",
+        pd.Timestamp("2024-01-01T00:00:00Z"),
+    )
+
+    assert called is False

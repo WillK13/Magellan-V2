@@ -298,6 +298,7 @@ def main() -> int:
         "auto_start": True,
         "labels": {
             "purpose": "stage4a2-workload-calibration",
+            "scheduler_mode": "operator_only",
             "measurement_id": measurement_id,
             "workload": workload_label,
             "variant": variant,

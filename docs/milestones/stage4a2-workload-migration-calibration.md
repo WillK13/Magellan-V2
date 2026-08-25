@@ -78,3 +78,5 @@ A complete Stage 4A.2 bundle contains 15 cases:
 The parent bundle includes `workload_profiles.csv`, `migration_samples.csv`,
 `case_summaries.json`, `representative_edges.json`, metadata, summary, and
 checksums, plus the complete raw child bundles for every case.
+
+- Calibration task runs use `scheduler_mode=operator_only` so background epochs cannot preempt the controlled migration trigger.

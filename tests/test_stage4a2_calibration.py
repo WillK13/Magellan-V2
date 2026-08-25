@@ -90,3 +90,11 @@ def test_stage4a2_small_dendro_horizon_allows_post_zero_step_progress() -> None:
     from scripts.run_stage4a2_calibration import DENDRO_VARIANTS
 
     assert DENDRO_VARIANTS[0] == ("short", 8, 3.0)
+
+
+def test_stage4a2_measurements_are_operator_only_for_background_scheduler() -> None:
+    workload_script = Path("scripts/measure_stage4a2_workload.py").read_text(encoding="utf-8")
+    llm_script = Path("scripts/measure_llm_migration.py").read_text(encoding="utf-8")
+
+    assert '"scheduler_mode": "operator_only"' in workload_script
+    assert '"scheduler_mode": "operator_only"' in llm_script

@@ -377,6 +377,7 @@ def build_daemon_context() -> DaemonContext:
         telemetry_service=telemetry_service,
         adaptive_policy_service=adaptive_policy_service,
         experiment_journal=experiment_journal,
+        task_catalog=task_catalog,
     )
 
     submission_service = TaskSubmissionService(

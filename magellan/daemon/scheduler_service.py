@@ -37,6 +37,7 @@ from magellan.state.persistent_registry import (
 from magellan.state.task_models import TaskStatus
 from magellan.telemetry.service import TelemetryService
 from magellan.experiments.events import ExperimentEventJournal
+from magellan.submission.catalog import TaskCatalogStore
 
 from magellan.runtime.checkpoint import (
     CheckpointManager,
@@ -69,6 +70,7 @@ class SchedulerService:
         telemetry_service: TelemetryService | None = None,
         adaptive_policy_service: AdaptivePolicyService | None = None,
         experiment_journal: ExperimentEventJournal | None = None,
+        task_catalog: TaskCatalogStore | None = None,
     ) -> None:
         self._local_node = local_node
         self._cluster = cluster
@@ -88,6 +90,7 @@ class SchedulerService:
         self._telemetry_service = telemetry_service
         self._adaptive_policy_service = adaptive_policy_service
         self._experiment_journal = experiment_journal
+        self._task_catalog = task_catalog
         self._broadcasted_completions: set[tuple[str, int, str | None]] = set()
         self._task_operation_locks: dict[str, asyncio.Lock] = {}
 
@@ -204,6 +207,21 @@ class SchedulerService:
             asyncio.Lock(),
         )
 
+    def _background_scheduling_enabled(self, task_id: str) -> bool:
+        """Return whether autonomous scheduler epochs may act on this run.
+
+        Operator-only runs are useful for controlled measurements that still
+        need the production pause/migration endpoints but must not be moved by
+        an unrelated background scheduler epoch before the measurement trigger.
+        """
+        if self._task_catalog is None:
+            return True
+        try:
+            run = self._task_catalog.get_run(task_id)
+        except KeyError:
+            return True
+        return run.labels.get("scheduler_mode") != "operator_only"
+
     async def _evaluate_task(
         self,
         task_id: str,
@@ -219,6 +237,14 @@ class SchedulerService:
                     f"[scheduler-skip] task={task_id} "
                     f"owner={state.owner_node_id} "
                     f"status={state.status.value}",
+                    flush=True,
+                )
+                return
+
+            if not self._background_scheduling_enabled(task_id):
+                print(
+                    f"[scheduler-skip] task={task_id} "
+                    "reason=operator_only",
                     flush=True,
                 )
                 return

@@ -733,6 +733,7 @@ def main() -> int:
         "auto_start": True,
         "labels": {
             "purpose": "real-llm-migration-validation",
+            "scheduler_mode": "operator_only",
             "measurement_id": measurement_id,
             "model": args.model,
         },
