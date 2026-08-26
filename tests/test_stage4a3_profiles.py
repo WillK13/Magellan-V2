@@ -6,13 +6,30 @@ from pathlib import Path
 
 from magellan.experiments.bundle import write_checksums
 from magellan.experiments.stage4a2 import summarize_profile_samples
-from scripts.run_stage4a3_profiles import BENCHMARKS, DENDRO_VARIANTS, SIZES
+from scripts.run_stage4a3_profiles import (
+    BENCHMARKS,
+    DENDRO_VARIANTS,
+    MINIMUM_SAMPLES_PER_RUN,
+    SIZES,
+    profile_summary_passes,
+)
 
 
 def test_stage4a3_matrix_has_thirteen_workload_classes() -> None:
     assert len(BENCHMARKS) * len(SIZES) + len(DENDRO_VARIANTS) + 1 == 13
     assert DENDRO_VARIANTS == ((8, 3.0), (9, 1.0), (10, 2.0))
 
+
+
+def test_stage4a3_pass_requires_minimum_samples() -> None:
+    base = {"passed": True, "profile_only": True}
+    assert MINIMUM_SAMPLES_PER_RUN == 3
+    assert not profile_summary_passes(
+        {**base, "profile": {"sample_count": MINIMUM_SAMPLES_PER_RUN - 1}}
+    )
+    assert profile_summary_passes(
+        {**base, "profile": {"sample_count": MINIMUM_SAMPLES_PER_RUN}}
+    )
 
 def test_profile_summary_includes_process_count() -> None:
     summary = summarize_profile_samples(

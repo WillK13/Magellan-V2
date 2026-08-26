@@ -18,6 +18,7 @@ from magellan.experiments.stage4a2 import summarize_profile_samples
 BENCHMARKS = ("nbody", "json", "matmul")
 SIZES = ("small", "medium", "large")
 DENDRO_VARIANTS = ((8, 3.0), (9, 1.0), (10, 2.0))
+MINIMUM_SAMPLES_PER_RUN = 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,12 +61,22 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def profile_summary_passes(summary: dict[str, Any]) -> bool:
+    profile = summary.get("profile") or {}
+    sample_count = int(profile.get("sample_count") or 0)
+    return (
+        bool(summary.get("passed"))
+        and summary.get("profile_only") is True
+        and sample_count >= MINIMUM_SAMPLES_PER_RUN
+    )
+
+
 def successful_profile_bundle(path: Path) -> bool:
     try:
         summary = read_json(path / "summary.json")
     except (FileNotFoundError, json.JSONDecodeError):
         return False
-    return bool(summary.get("passed")) and summary.get("profile_only") is True
+    return profile_summary_passes(summary)
 
 
 def run_case(command: list[str], bundle: Path, resume: bool) -> None:
@@ -260,13 +271,14 @@ def main() -> int:
 
     expected_classes = (9 if "benchmarks" in phases else 0) + (3 if "dendro" in phases else 0) + (1 if "llm" in phases else 0)
     expected_runs = expected_classes * args.trials
-    passed = [item for item in case_summaries if item.get("passed") is True and item.get("profile_only") is True]
+    passed = [item for item in case_summaries if profile_summary_passes(item)]
     summary = {
         "calibration_id": calibration_id,
         "node_id": args.node,
         "partner_node_id": args.partner_node,
         "phases": sorted(phases),
         "trials_per_class": args.trials,
+        "minimum_samples_per_run": MINIMUM_SAMPLES_PER_RUN,
         "expected_class_count": expected_classes,
         "observed_class_count": len(class_rows),
         "expected_run_count": expected_runs,
@@ -288,7 +300,10 @@ def main() -> int:
         "methodology": {
             "scheduler": "Every task is labeled scheduler_mode=operator_only and no operator migration is requested.",
             "hardware_scope": "One canonical final-hardware e2-highmem-2 node; Stage 4A.4 measures node-to-node static execution behavior.",
-            "replication": f"{args.trials} independent task runs per workload class.",
+            "replication": (
+                f"{args.trials} independent task runs per workload class; "
+                f"each passing run requires at least {MINIMUM_SAMPLES_PER_RUN} telemetry samples."
+            ),
             "benchmark_matrix": "nbody/json/matmul x small/medium/large",
             "dendro_matrix": "(resolution,time_end) = (8,3.0), (9,1.0), (10,2.0)",
             "llm_matrix": f"one real CPU causal-LM profile using {args.llm_model}",
