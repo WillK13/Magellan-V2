@@ -43,6 +43,8 @@ def main() -> int:
     equivalence = read_csv(root / "node_equivalence.csv")
     if summary.get("passed") is not True:
         errors.append("Parent summary is not passed")
+    if summary.get("authoritative_runtime_field") != "wall_seconds":
+        errors.append("Stage 4A.4 authoritative runtime field is not wall_seconds")
     expected_runs = int(summary.get("expected_physical_run_count", -1))
     expected_classes = int(summary.get("expected_class_count", -1))
     expected_nodes = int(summary.get("expected_node_count", -1))
@@ -73,6 +75,8 @@ def main() -> int:
             errors.append(f"Canonical trial count mismatch for {class_id}: {canonical_counts[class_id]} != {trials}")
         if int(float(row.get("trial_count") or 0)) != trials:
             errors.append(f"Class summary trial count mismatch for {class_id}")
+        if float(row.get("runtime_seconds_median") or 0) <= 0:
+            errors.append(f"Non-positive canonical runtime for {class_id}")
 
     if summary.get("representative_equivalence_class") != REPRESENTATIVE_EQUIVALENCE_CLASS:
         errors.append("Unexpected representative equivalence class")

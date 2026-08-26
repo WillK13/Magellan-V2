@@ -193,6 +193,7 @@ def main() -> int:
     telemetry_samples: list[dict[str, Any]] = []
     last_sample_at: str | None = None
     final_state: dict[str, Any] | None = None
+    runtime_reconcile_count = 0
     try:
         while time.monotonic() < deadline:
             state = task_state(api, run_id)
@@ -227,6 +228,26 @@ def main() -> int:
                         "measured_power_kw": telemetry.get("measured_power_kw"),
                         "progress_rate_units_per_second": telemetry.get("progress_rate_units_per_second"),
                     })
+
+            # Runtime completion reconciliation is intentionally separate from
+            # scheduler evaluation. Real Dendro exits cleanly but its generic
+            # completion marker is synthesized by runtime.reconcile(); polling
+            # this operator endpoint avoids waiting for the 900-second scheduler
+            # epoch while preserving scheduler_mode=operator_only isolation.
+            if state.get("pid") is not None:
+                request_json(
+                    f"{api}/runtime/reconcile",
+                    method="POST",
+                    timeout=min(30.0, args.timeout_seconds),
+                )
+                runtime_reconcile_count += 1
+                reconciled_state = task_state(api, run_id)
+                if reconciled_state is not None:
+                    if reconciled_state.get("status") == "failed":
+                        raise RuntimeError(f"Static task failed during runtime reconciliation: {reconciled_state}")
+                    if reconciled_state.get("status") == "completed":
+                        final_state = reconciled_state
+                        break
             time.sleep(args.poll_seconds)
         if final_state is None:
             raise TimeoutError(f"Static task {run_id} did not complete before timeout")
@@ -247,6 +268,9 @@ def main() -> int:
             "generation": final_state.get("generation"),
             "owner_node_id": final_state.get("owner_node_id"),
             "wall_seconds": wall_seconds,
+            "authoritative_runtime_seconds": wall_seconds,
+            "runtime_reconcile_count": runtime_reconcile_count,
+            "completion_detection": "operator_runtime_reconcile",
             "telemetry_sample_count": len(telemetry_samples),
             "progress_completed_units": final_state.get("progress_completed_units"),
             "progress_total_units": final_state.get("progress_total_units"),
@@ -283,6 +307,14 @@ def main() -> int:
             "methodology": {
                 "scheduler_mode": "operator_only",
                 "migration_policy": "No pause or migration is permitted; task runs to natural completion on its initial node.",
+                "completion_detection": (
+                    "The measurement poller invokes POST /runtime/reconcile after observing a live PID. "
+                    "This finalizes naturally exited runtimes (including real Dendro) without running a scheduler epoch."
+                ),
+                "authoritative_runtime": (
+                    "wall_seconds from task started_at_utc to the validated completion marker. "
+                    "Persisted accumulated accounting fields are retained only as diagnostics and are not used for Stage 4A.4 runtime or slowdown aggregation."
+                ),
             },
         }
         if telemetry_samples:
@@ -296,7 +328,8 @@ def main() -> int:
         print(f"bundle: {bundle}")
         print(f"run_id: {run_id}")
         print(f"wall_seconds: {wall_seconds:.3f}")
-        print(f"runtime_seconds: {float(summary['accumulated_runtime_seconds'] or 0):.3f}")
+        print(f"runtime_seconds: {wall_seconds:.3f}")
+        print(f"accounting_runtime_seconds_diagnostic: {float(summary['accumulated_runtime_seconds'] or 0):.3f}")
         print(f"samples: {len(telemetry_samples)}")
         return 0
     finally:

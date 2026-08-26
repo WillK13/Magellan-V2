@@ -72,6 +72,8 @@ def test_successful_static_bundle_rejects_migration_and_low_samples(tmp_path: Pa
         "status": "completed",
         "telemetry_sample_count": 4,
         "generation": 0,
+        "wall_seconds": 100.0,
+        "workload": "benchmark",
         "accumulated_migration_seconds": 0.0,
         "accumulated_transfer_cost_usd": 0.0,
         "accumulated_transfer_carbon_grams": 0.0,
@@ -88,6 +90,16 @@ def test_successful_static_bundle_rejects_migration_and_low_samples(tmp_path: Pa
     (tmp_path / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
     write_checksums(tmp_path)
     assert not successful_static_bundle(tmp_path)
+    summary["telemetry_sample_count"] = 4
+    summary["accumulated_migration_seconds"] = 0.0
+    summary["workload"] = "dendro"
+    (tmp_path / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    write_checksums(tmp_path)
+    assert not successful_static_bundle(tmp_path)
+    summary["completion_detection"] = "operator_runtime_reconcile"
+    (tmp_path / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    write_checksums(tmp_path)
+    assert successful_static_bundle(tmp_path)
 
 
 def test_static_aggregates_and_node_slowdown():
@@ -107,12 +119,17 @@ def test_static_aggregates_and_node_slowdown():
             })
     classes = summarize_canonical_runs(rows, trials=3)
     assert len(classes) == 2
-    assert classes[0]["runtime_seconds_median"] == pytest.approx(100.0)
+    assert classes[0]["runtime_seconds_median"] == pytest.approx(101.0)
+    assert classes[0]["accounting_runtime_seconds_median_diagnostic"] == pytest.approx(100.0)
 
     eq = []
     for node, runtimes in (("boston", (90, 100, 110)), ("virginia", (99, 110, 121))):
         for runtime in runtimes:
-            eq.append({"node_id": node, "accumulated_runtime_seconds": runtime})
+            eq.append({
+                "node_id": node,
+                "wall_seconds": runtime,
+                "accumulated_runtime_seconds": runtime / 10,
+            })
     summary = summarize_node_equivalence(eq, canonical_node_id="boston", trials=3)
     by_node = {row["node_id"]: row for row in summary}
     assert by_node["boston"]["slowdown_vs_canonical"] == pytest.approx(1.0)

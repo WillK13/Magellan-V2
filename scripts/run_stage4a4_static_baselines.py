@@ -227,6 +227,7 @@ def main() -> int:
         "representative_equivalence_class": REPRESENTATIVE_EQUIVALENCE_CLASS,
         "trials_per_class": args.trials,
         "target_seconds": args.target_seconds,
+        "authoritative_runtime_field": "wall_seconds",
         "expected_class_count": len(cases),
         "observed_class_count": len(canonical_classes),
         "expected_node_count": len(node_ids),
@@ -256,6 +257,8 @@ def main() -> int:
             "canonical_static_completion": "All 13 Stage 4A.3 workload classes run to natural completion on the canonical node for three trials with scheduler_mode=operator_only.",
             "finite_length_selection": "Benchmark iterations and LLM max_steps are derived from Stage 4A.3 median progress rates to target a stable finite completion window; Dendro physical resolution/time-end variants are unchanged.",
             "node_equivalence": f"{REPRESENTATIVE_EQUIVALENCE_CLASS} is measured on all seven identical final-hardware nodes; canonical-node trials are reused from the 13-class matrix.",
+            "completion_reconciliation": "The child harness invokes the operator-only /runtime/reconcile endpoint while polling so naturally exited Dendro tasks are finalized promptly without waiting for a scheduler epoch.",
+            "authoritative_runtime": "started_at_utc to validated completion-marker time (wall_seconds). Persisted accumulated accounting fields are diagnostic only in Stage 4A.4 and are not used for runtime or slowdown aggregation.",
             "accuracy_policy": "Node slowdown factors are recorded descriptively; no regional runtime samples are discarded by an accuracy threshold.",
         },
     }

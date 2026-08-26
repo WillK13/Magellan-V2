@@ -231,12 +231,17 @@ def successful_static_bundle(path: str | Path, *, minimum_samples: int = 3) -> b
     return bool(
         summary.get("passed") is True
         and summary.get("status") == "completed"
+        and float(summary.get("wall_seconds") or 0.0) > 0.0
         and int(summary.get("telemetry_sample_count") or 0) >= minimum_samples
         and int(summary.get("generation") or 0) == 0
         and float(summary.get("accumulated_paused_seconds") or 0.0) <= 1e-9
         and float(summary.get("accumulated_migration_seconds") or 0.0) <= 1e-9
         and float(summary.get("accumulated_transfer_cost_usd") or 0.0) <= 1e-12
         and float(summary.get("accumulated_transfer_carbon_grams") or 0.0) <= 1e-12
+        and (
+            summary.get("workload") != "dendro"
+            or summary.get("completion_detection") == "operator_runtime_reconcile"
+        )
     )
 
 
@@ -248,16 +253,24 @@ def summarize_canonical_runs(rows: list[dict[str, Any]], *, trials: int) -> list
     for class_id, items in sorted(grouped.items()):
         if len(items) != trials:
             raise ValueError(f"{class_id} has {len(items)} canonical trials, expected {trials}")
+        completion_median = median(float(item["wall_seconds"]) for item in items)
         output.append(
             {
                 "class_id": class_id,
                 "workload": items[0]["workload"],
                 "variant": items[0]["variant"],
                 "trial_count": len(items),
-                "wall_seconds_median": median(float(item["wall_seconds"]) for item in items),
-                "runtime_seconds_median": median(float(item["accumulated_runtime_seconds"]) for item in items),
-                "cost_usd_median": median(float(item["accumulated_cost_usd"]) for item in items),
-                "carbon_grams_median": median(float(item["accumulated_carbon_grams"]) for item in items),
+                "wall_seconds_median": completion_median,
+                "runtime_seconds_median": completion_median,
+                "accounting_runtime_seconds_median_diagnostic": median(
+                    float(item["accumulated_runtime_seconds"] or 0.0) for item in items
+                ),
+                "accounting_cost_usd_median_diagnostic": median(
+                    float(item["accumulated_cost_usd"] or 0.0) for item in items
+                ),
+                "accounting_carbon_grams_median_diagnostic": median(
+                    float(item["accumulated_carbon_grams"] or 0.0) for item in items
+                ),
                 "telemetry_samples_median": median(int(item["telemetry_sample_count"]) for item in items),
             }
         )
@@ -279,7 +292,7 @@ def summarize_node_equivalence(
     for node_id, items in grouped.items():
         if len(items) != trials:
             raise ValueError(f"{node_id} has {len(items)} equivalence trials, expected {trials}")
-        medians[node_id] = median(float(item["accumulated_runtime_seconds"]) for item in items)
+        medians[node_id] = median(float(item["wall_seconds"]) for item in items)
     baseline = medians[canonical_node_id]
     if baseline <= 0:
         raise ValueError("Canonical runtime must be positive")
