@@ -137,3 +137,17 @@ Use `scripts/run_stage4a3_profiles.py` after Stage 4A.2 and after validating
 workload-session telemetry for MPI/Dendro. The campaign is profile-only: it does
 not perform migrations and therefore does not replace or modify the canonical
 Stage 4A.2 bundle.
+
+## Stage 4A.4 static execution baselines
+
+Run finite scheduler-isolated workloads to natural completion and validate
+regional final-hardware equivalence:
+
+```bash
+python scripts/run_stage4a4_static_baselines.py \
+  --stage4a3-bundle experiments/measurements/<stage4a3-id>
+python scripts/validate_stage4a4_static_baselines.py \
+  experiments/measurements/<stage4a4-id>
+```
+
+See `docs/milestones/stage4a4-static-execution-baselines.md` for methodology.
