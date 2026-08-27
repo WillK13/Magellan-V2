@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measurement-id", required=True)
     parser.add_argument("--class-id", required=True)
     parser.add_argument("--trial", type=int, required=True)
-    parser.add_argument("--scope", choices=["canonical", "equivalence"], required=True)
+    parser.add_argument("--scope", choices=["canonical", "equivalence", "validation"], required=True)
     parser.add_argument("--expected-carbon-metric", default="lifecycle")
     parser.add_argument("--expected-state-token", default="runtime-state-gcp-measurement")
     return parser.parse_args()
@@ -299,7 +299,7 @@ def main() -> int:
         "idempotency_key": fresh_run_idempotency_key(args.measurement_id),
         "auto_start": True,
         "labels": {
-            "purpose": "stage4a4-static-completion",
+            "purpose": ("stage4a5-runtime-validation" if args.scope == "validation" else "stage4a4-static-completion"),
             "scheduler_mode": "operator_only",
             "measurement_id": args.measurement_id,
             "class_id": args.class_id,
@@ -420,7 +420,7 @@ def main() -> int:
         }
         metadata = {
             "format_version": 1,
-            "measurement_type": "stage4a4_static_completion",
+            "measurement_type": ("stage4a5_runtime_validation" if args.scope == "validation" else "stage4a4_static_completion"),
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "preflight": preflight,
             "definition": definition,

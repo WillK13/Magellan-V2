@@ -151,3 +151,12 @@ python scripts/validate_stage4a4_static_baselines.py \
 ```
 
 See `docs/milestones/stage4a4-static-execution-baselines.md` for methodology.
+
+### Stage 4A.5 calibration/model validation
+
+`scripts/run_stage4a5_calibration_validation.py` consumes the frozen Stage
+4A.1–4A.4 bundles and runs a held-out 24-run regional runtime-transfer matrix spanning JSON, real MPI/Dendro, and DistilGPT2.
+The validator is `scripts/validate_stage4a5_calibration_validation.py`. A
+failed runtime-transfer gate is a scientific result, not a corrupt bundle: it
+blocks use of the universal Stage 4A.4 slowdown factor in Stage 4B and requires
+workload-family-specific or direct per-node runtime calibration.
