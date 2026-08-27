@@ -160,3 +160,15 @@ The validator is `scripts/validate_stage4a5_calibration_validation.py`. A
 failed runtime-transfer gate is a scientific result, not a corrupt bundle: it
 blocks use of the universal Stage 4A.4 slowdown factor in Stage 4B and requires
 workload-family-specific or direct per-node runtime calibration.
+
+### Stage 4B calibrated core policy comparison
+
+After Stage 4A.5 approves the regional runtime-transfer model, run
+`scripts/run_stage4b_core_comparison.py` with the frozen Stage 4A.1–4A.5
+bundles. The default offline replay compares Boston-static, best-static, an
+explicit GAIA Carbon-Time (`cst_average`) reproduction, causal production
+Magellan, and a clairvoyant spatiotemporal static oracle-style reference over 72
+deterministic annual scenarios. Validate the checksummed result with
+`scripts/validate_stage4b_core_comparison.py`. See
+`docs/milestones/stage4b-core-calibrated-comparison.md` for the exact fairness
+boundary and calibration inputs.
