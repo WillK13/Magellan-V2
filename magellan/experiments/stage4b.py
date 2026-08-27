@@ -149,6 +149,19 @@ def read_csv(path: str | Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def load_stage4a1_edges(
+    stage4a1_bundle: str | Path,
+    stage4a1_summary: dict[str, Any],
+) -> list[dict[str, str]]:
+    network_relative = stage4a1_summary.get("network_bundle")
+    if not network_relative:
+        raise ValueError("Stage 4A.1 summary is missing network_bundle")
+    edges_path = Path(stage4a1_bundle) / str(network_relative) / "edges.csv"
+    if not edges_path.is_file():
+        raise FileNotFoundError(edges_path)
+    return read_csv(edges_path)
+
+
 def read_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 

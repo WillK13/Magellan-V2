@@ -16,6 +16,7 @@ from magellan.experiments.stage4b import (
     gaia_carbon_time_score,
     gaia_queue_parameters,
     load_node_slowdowns,
+    load_stage4a1_edges,
     load_workload_calibrations,
     outcome_rows,
     replay_magellan_causal,
@@ -119,6 +120,18 @@ def test_loads_frozen_workload_and_node_calibration(tmp_path: Path):
     assert loaded["llm-distilgpt2"].checkpoint_seconds == pytest.approx(11.0)
     assert loaded["llm-distilgpt2"].migration_overhead_seconds == pytest.approx(4.0)
     assert load_node_slowdowns(a4) == {"boston": 1.0, "virginia": 0.95}
+
+
+def test_stage4a1_edges_follow_canonical_nested_network_bundle(tmp_path: Path):
+    a1 = tmp_path / "a1"
+    rows = [{
+        "source_node_id": "boston",
+        "destination_node_id": "virginia",
+        "transfer_steady_bandwidth_mbps": "25",
+    }]
+    write_csv(a1 / "network" / "directed-mesh" / "edges.csv", rows)
+    loaded = load_stage4a1_edges(a1, {"network_bundle": "network/directed-mesh"})
+    assert loaded == rows
 
 
 def test_frozen_graph_uses_stage4a1_affine_edge_model():

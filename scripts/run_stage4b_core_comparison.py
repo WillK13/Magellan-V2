@@ -21,9 +21,9 @@ from magellan.experiments.stage4b import (
     descriptive_policy_metrics,
     gaia_queue_parameters,
     load_node_slowdowns,
+    load_stage4a1_edges,
     load_workload_calibrations,
     outcome_rows,
-    read_csv,
     scenario_outcomes,
     summarize_policy_rows,
 )
@@ -100,7 +100,7 @@ def main() -> int:
         stage4a4_bundle=a4,
         class_ids=CORE_WORKLOADS,
     )
-    edge_rows = read_csv(a1 / "network" / "edges.csv")
+    edge_rows = load_stage4a1_edges(a1, a1_summary)
     expected_edges = len(cluster.nodes) * (len(cluster.nodes) - 1)
     if len(edge_rows) != expected_edges:
         raise RuntimeError(f"Stage 4A.1 edge count {len(edge_rows)} != expected {expected_edges}")
