@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from magellan.experiments.bundle import write_checksums
+from scripts.measure_stage4a4_static import CLEANUP_STATUSES, requires_local_model_asset
+
 from magellan.experiments.stage4a4 import (
     build_static_cases,
     llm_training_definition,
@@ -134,3 +136,13 @@ def test_static_aggregates_and_node_slowdown():
     by_node = {row["node_id"]: row for row in summary}
     assert by_node["boston"]["slowdown_vs_canonical"] == pytest.approx(1.0)
     assert by_node["virginia"]["slowdown_vs_canonical"] == pytest.approx(1.1)
+
+
+def test_static_cleanup_includes_failed_tasks():
+    assert "failed" in CLEANUP_STATUSES
+
+
+def test_static_llm_model_asset_detection():
+    assert requires_local_model_asset("experiment-assets/models/distilgpt2")
+    assert requires_local_model_asset("./model")
+    assert not requires_local_model_asset("distilgpt2")

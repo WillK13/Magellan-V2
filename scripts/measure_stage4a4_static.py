@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,10 +18,15 @@ from magellan.experiments.stage4a4 import llm_training_definition
 from magellan.experiments.workload_population import benchmark_definition, dendro_definition
 
 
+CLEANUP_STATUSES = {"running", "paused", "failed", "recovering", "migrating"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Measure one scheduler-isolated Stage 4A.4 static completion run.")
     parser.add_argument("--cluster", default="config/cluster.gcp.json")
     parser.add_argument("--local-node-id", default="boston")
+    parser.add_argument("--ssh-user", default="WILL")
+    parser.add_argument("--remote-repo", default="~/Magellan-V2")
     parser.add_argument("--node", required=True)
     parser.add_argument("--workload", choices=["benchmark", "dendro", "llm"], required=True)
     parser.add_argument("--benchmark", choices=["nbody", "json", "matmul"], default=None)
@@ -36,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm-checkpoint-every", type=int, default=1)
     parser.add_argument("--llm-sleep-per-step", type=float, default=2.0)
     parser.add_argument("--llm-torch-threads", type=int, default=2)
+    parser.add_argument(
+        "--minimum-free-gib",
+        type=float,
+        default=2.5,
+        help="Minimum free disk required before starting an LLM static run.",
+    )
     parser.add_argument("--sample-interval-seconds", type=float, default=5.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--timeout-seconds", type=float, default=1800.0)
@@ -62,6 +75,86 @@ def request_json(url: str, method: str = "GET", payload: dict[str, Any] | None =
 
 def base_url(node: Any, port: int) -> str:
     return f"http://{node.internal_ip}:{port}"
+
+
+def remote_cd(path: str) -> str:
+    if path == "~":
+        return 'cd "$HOME"'
+    if path.startswith("~/"):
+        return f'cd "$HOME"/{shlex.quote(path[2:])}'
+    return f"cd {shlex.quote(path)}"
+
+
+def run_on_node(
+    *,
+    local_node_id: str,
+    node: Any,
+    ssh_user: str,
+    command: str,
+    timeout: float = 30.0,
+) -> subprocess.CompletedProcess[str]:
+    if node.id == local_node_id:
+        argv = ["bash", "-lc", command]
+    else:
+        argv = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            f"{ssh_user}@{node.internal_ip}",
+            command,
+        ]
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=timeout,
+    )
+
+
+def available_bytes(
+    *,
+    local_node_id: str,
+    node: Any,
+    ssh_user: str,
+    remote_repo: str,
+) -> int:
+    result = run_on_node(
+        local_node_id=local_node_id,
+        node=node,
+        ssh_user=ssh_user,
+        command=f"{remote_cd(remote_repo)} && df -Pk . | tail -1 | awk '{{print $4}}'",
+    )
+    return int(result.stdout.strip()) * 1024
+
+
+def requires_local_model_asset(model: str) -> bool:
+    return model.startswith(".") or model.startswith("/") or "/" in model
+
+
+def model_asset_exists(
+    *,
+    local_node_id: str,
+    node: Any,
+    ssh_user: str,
+    remote_repo: str,
+    model: str,
+) -> bool:
+    if not requires_local_model_asset(model):
+        return True
+    command = f"{remote_cd(remote_repo)} && test -e {shlex.quote(model)}"
+    try:
+        run_on_node(
+            local_node_id=local_node_id,
+            node=node,
+            ssh_user=ssh_user,
+            command=command,
+        )
+    except subprocess.CalledProcessError:
+        return False
+    return True
 
 
 def task_state(api: str, run_id: str) -> dict[str, Any] | None:
@@ -155,10 +248,40 @@ def main() -> int:
     args = parse_args()
     if args.sample_interval_seconds <= 0 or args.poll_seconds <= 0 or args.timeout_seconds <= 0:
         raise ValueError("sample/poll/timeout values must be positive")
+    if args.minimum_free_gib <= 0:
+        raise ValueError("--minimum-free-gib must be positive")
     cluster = load_cluster_config(args.cluster)
     node = cluster.get_node(args.node)
     api = base_url(node, cluster.api_port)
     preflight = idle_preflight(api, args.node, args.expected_carbon_metric, args.expected_state_token)
+    if args.workload == "llm":
+        if not model_asset_exists(
+            local_node_id=args.local_node_id,
+            node=node,
+            ssh_user=args.ssh_user,
+            remote_repo=args.remote_repo,
+            model=args.model,
+        ):
+            raise RuntimeError(
+                f"LLM model asset {args.model!r} is missing on {args.node}; "
+                "provision the same experiment asset before starting a fresh static run"
+            )
+        free_bytes = available_bytes(
+            local_node_id=args.local_node_id,
+            node=node,
+            ssh_user=args.ssh_user,
+            remote_repo=args.remote_repo,
+        )
+        required_bytes = int(args.minimum_free_gib * 1024**3)
+        preflight["llm_disk"] = {
+            "free_bytes": free_bytes,
+            "minimum_free_bytes": required_bytes,
+        }
+        if free_bytes < required_bytes:
+            raise RuntimeError(
+                f"Insufficient free disk on {args.node} for LLM static run: "
+                f"free={free_bytes} required={required_bytes}"
+            )
 
     bundle = Path(args.measurements_root) / args.measurement_id
     if bundle.exists():
@@ -335,7 +458,7 @@ def main() -> int:
     finally:
         try:
             state = task_state(api, run_id)
-            if state is not None and state.get("status") in {"running", "paused", "recovering", "migrating"}:
+            if state is not None and state.get("status") in CLEANUP_STATUSES:
                 request_json(f"{api}/tasks/{run_id}/stop", method="POST", timeout=min(120.0, args.timeout_seconds))
         except Exception:
             pass
