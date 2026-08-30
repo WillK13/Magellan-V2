@@ -63,7 +63,7 @@ The current implementation increases:
 
 Per-epoch min/max normalization can make identical physical values receive very different normalized scores as candidate sets change. V2 therefore stores recent ranges for each objective across scheduler epochs.
 
-For each task and objective, the policy store retains the minimum and maximum observed in the most recent `rolling_window_epochs`. Current candidates are normalized against the aggregate rolling bounds. New observations enter the window before the current epoch is scored, ensuring normalized values stay in `[0,1]`.
+For each task and objective, the policy store retains the minimum and maximum observed in the most recent `rolling_window_epochs`. Time, carbon, and monetary cost are non-negative quantities with a meaningful physical zero, so production scoring uses a zero-anchored rolling range: the lower normalization bound is `0` and the upper bound is the rolling maximum. This preserves adaptation to changing scale without expanding a narrow absolute spread (for example, a few cents of compute price) to the entire `[0,1]` interval. New observations enter the window before the current epoch is scored. The legacy rolling min/max behavior remains available through `adaptive.normalization_zero_anchor=false` for replay/debugging.
 
 ## Durable state
 

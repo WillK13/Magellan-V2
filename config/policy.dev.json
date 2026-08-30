@@ -79,6 +79,7 @@
     "enabled": true,
     "multiplier_bound_fraction": 0.25,
     "rolling_window_epochs": 24,
+    "normalization_zero_anchor": true,
     "decision_history_limit": 50,
     "confidence_floor": 0.25
   },

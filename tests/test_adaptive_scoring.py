@@ -12,10 +12,17 @@ from magellan.config.policy_models import (
     ScoringPolicy,
 )
 from magellan.graph.topology import ClusterGraph
-from magellan.models.types import ActionType, TaskProfile
+from magellan.models.types import ActionType, RawActionEstimate, TaskProfile
 from magellan.policy.adaptive import AdaptivePolicyService
+from magellan.policy.models import (
+    AdaptationSignals,
+    AdaptiveDecisionContext,
+    NormalizationBounds,
+    WeightMultipliers,
+    WeightVector,
+)
 from magellan.policy.store import AdaptivePolicyStore
-from magellan.scheduler.scoring import evaluate_task
+from magellan.scheduler.scoring import evaluate_task, score_actions
 
 
 class Carbon:
@@ -155,3 +162,51 @@ def test_hard_cost_cap_prunes_migration_before_adaptive_scoring(tmp_path) -> Non
         ]
         == 1.0
     )
+
+
+def test_zero_anchored_bounds_do_not_magnify_narrow_cost_spread() -> None:
+    """Regression for the Stage 4C Ethiopia->Boston normalization bounce."""
+    candidate_estimates = [
+        RawActionEstimate(
+            action=ActionType.CONTINUE,
+            source_node_id="ethiopia",
+            time_seconds=5400.0,
+            carbon_grams=3.621640777644515,
+            cost_usd=0.1491,
+        ),
+        RawActionEstimate(
+            action=ActionType.MIGRATE,
+            source_node_id="ethiopia",
+            destination_node_id="boston",
+            time_seconds=5406.9364201991,
+            carbon_grams=24.686744137214127,
+            cost_usd=0.13560000518,
+        ),
+    ]
+    context = AdaptiveDecisionContext(
+        task_id="stage4c-regression",
+        baseline_weights=WeightVector(time=0.25, carbon=0.5, cost=0.25),
+        effective_weights=WeightVector(
+            time=0.2483950317843971,
+            carbon=0.5032099364312059,
+            cost=0.2483950317843971,
+        ),
+        multipliers=WeightMultipliers(
+            time=1.0, carbon=1.0129227078663636, cost=1.0
+        ),
+        signals=AdaptationSignals(),
+        normalization_bounds=NormalizationBounds(
+            time_min=0.0,
+            time_max=12840.0,
+            carbon_min=0.0,
+            carbon_max=93.6614137186866,
+            cost_min=0.0,
+            cost_max=0.16350000518,
+            source="rolling_window_zero_anchored",
+        ),
+    )
+
+    ranked = score_actions(candidate_estimates, policy(), context)
+
+    assert ranked[0].action == ActionType.CONTINUE
+    assert ranked[0].source_node_id == "ethiopia"

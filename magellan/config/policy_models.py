@@ -174,6 +174,12 @@ class AdaptivePolicy(BaseModel):
     enabled: bool = True
     multiplier_bound_fraction: float = Field(default=0.25, ge=0, le=0.5)
     rolling_window_epochs: int = Field(default=24, ge=1, le=1000)
+    # Time, carbon, and cost are non-negative metrics with meaningful zero.
+    # Anchoring rolling normalization at zero prevents a narrow absolute
+    # range (for example, a few cents of compute cost) from being expanded
+    # to the full [0, 1] interval and overpowering much larger physical
+    # differences in another objective.
+    normalization_zero_anchor: bool = True
     decision_history_limit: int = Field(default=50, ge=1, le=1000)
     confidence_floor: float = Field(default=0.25, ge=0, le=1)
 

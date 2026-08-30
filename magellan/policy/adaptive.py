@@ -84,6 +84,22 @@ class AdaptivePolicyService:
         assert time_bounds is not None
         assert carbon_bounds is not None
         assert cost_bounds is not None
+        if self.policy.normalization_zero_anchor:
+            # These objectives all have a meaningful physical zero. Using
+            # rolling (max - min) ranges can magnify a tiny absolute spread
+            # into the full normalized interval. Keep the rolling maxima for
+            # adaptation to changing scale, but anchor the lower bound at
+            # zero so the normalized difference reflects absolute magnitude.
+            return NormalizationBounds(
+                time_min=0.0,
+                time_max=time_bounds[1],
+                carbon_min=0.0,
+                carbon_max=carbon_bounds[1],
+                cost_min=0.0,
+                cost_max=cost_bounds[1],
+                source="rolling_window_zero_anchored",
+            )
+
         return NormalizationBounds(
             time_min=time_bounds[0],
             time_max=time_bounds[1],

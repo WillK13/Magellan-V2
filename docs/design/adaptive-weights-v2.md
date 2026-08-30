@@ -85,7 +85,9 @@ Hard constraints always take precedence. For example, reaching a cost cap prunes
 
 ### Rolling normalization
 
-Each peer should persist a bounded rolling window or exponentially decayed extrema for the raw action estimates:
+Each peer should persist a bounded rolling window or exponentially decayed extrema for the raw action estimates. Because all three objectives have meaningful physical zero, the production normalizer anchors the lower bound at zero and uses the rolling maximum as the scale; this avoids magnifying tiny absolute candidate spreads into full-scale objective differences. Legacy rolling min/max normalization can still be enabled explicitly for replay/debugging.
+
+The raw action estimates are:
 
 ```text
 time_seconds

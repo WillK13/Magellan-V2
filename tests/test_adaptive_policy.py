@@ -115,10 +115,28 @@ def test_rolling_normalization_spans_multiple_epochs(tmp_path) -> None:
         now + timedelta(seconds=30),
     )
 
-    assert first.normalization_bounds.time_min == pytest.approx(100)
+    assert first.normalization_bounds.time_min == pytest.approx(0)
     assert first.normalization_bounds.time_max == pytest.approx(120)
-    assert second.normalization_bounds.time_min == pytest.approx(100)
+    assert second.normalization_bounds.time_min == pytest.approx(0)
     assert second.normalization_bounds.time_max == pytest.approx(1200)
+    assert first.normalization_bounds.source == "rolling_window_zero_anchored"
+
+
+def test_legacy_rolling_minmax_can_be_selected_explicitly(tmp_path) -> None:
+    adaptive = service(
+        tmp_path,
+        rolling_window_epochs=2,
+        normalization_zero_anchor=False,
+    )
+    context = adaptive.prepare(
+        profile(),
+        estimates(time_scale=1),
+        datetime.now(timezone.utc),
+    )
+
+    assert context.normalization_bounds.time_min == pytest.approx(100)
+    assert context.normalization_bounds.time_max == pytest.approx(120)
+    assert context.normalization_bounds.source == "rolling_window"
 
 
 def test_adaptive_policy_store_survives_restart(tmp_path) -> None:
