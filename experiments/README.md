@@ -172,3 +172,23 @@ deterministic annual scenarios. Validate the checksummed result with
 `scripts/validate_stage4b_core_comparison.py`. See
 `docs/milestones/stage4b-core-calibrated-comparison.md` for the exact fairness
 boundary and calibration inputs.
+
+### Stage 4C 72-hour dynamic crossover
+
+`scripts/run_stage4c_dynamic_crossover.py` replays one trace-selected 72-hour
+arrival per season for the three frozen headline workloads. It preserves the
+production causal scheduler and records complete migration/residence and carbon-
+leadership diagnostics. Multiple migration is not a pass criterion; a migrate-once
+result is preserved rather than tuned into traversal. Validate with
+`scripts/validate_stage4c_dynamic_crossover.py`.
+
+### Stage 4D.1 evidence-backed resource capacity model
+
+Before multi-task contention, run `scripts/run_stage4d1_resource_model.py` against
+the canonical Stage 4B bundle. It derives conservative per-node CPU/memory/GPU
+capacity from Stage 4A.1 configured plus observed hardware and derives the three
+headline workload requests from Stage 4A.3 aggregate p95 CPU/RSS measurements. It
+uses no synthetic task-slot cap. Validate with
+`scripts/validate_stage4d1_resource_model.py`; see
+`docs/milestones/stage4d1-resource-capacity-model.md` for the exact boundary to the
+Stage 4D.2 auction replay.
