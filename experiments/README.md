@@ -192,3 +192,16 @@ uses no synthetic task-slot cap. Validate with
 `scripts/validate_stage4d1_resource_model.py`; see
 `docs/milestones/stage4d1-resource-capacity-model.md` for the exact boundary to the
 Stage 4D.2 auction replay.
+
+### Stage 4D.2 measured-capacity multi-task auction replay
+
+`scripts/run_stage4d2_multitask_auction.py` consumes the canonical Stage 4D.1
+resource model plus the corrected Stage 4C seasonal windows. Each seasonal scenario
+starts an 11-task population with every node in one Stage-4D.1 maximal resource
+packing, then replays production task scoring and destination-side `lowest_score` or
+`credit_fair` auctions as capacity becomes available. It also reports a static initial
+layout and an unlimited independent-Magellan reference. No synthetic task-slot cap,
+preemption, queue, top-k fallback bid, or forced migration is introduced. Validate
+with `scripts/validate_stage4d2_multitask_auction.py`; see
+`docs/milestones/stage4d2-multitask-auction-replay.md` for the co-location model
+boundary and exact semantics.
