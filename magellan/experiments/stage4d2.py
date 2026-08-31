@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 
@@ -36,6 +36,83 @@ LOWEST_SCORE_POLICY = "magellan_capacity_lowest_score"
 CREDIT_FAIR_POLICY = "magellan_capacity_credit_fair"
 CAPACITY_POLICIES = (LOWEST_SCORE_POLICY, CREDIT_FAIR_POLICY)
 ALL_POLICIES = (STATIC_POLICY, UNLIMITED_POLICY, *CAPACITY_POLICIES)
+
+
+class ReplayCarbonStore(CarbonStore):
+    """CarbonStore with exact process-local memoization for offline replay.
+
+    Stage 4D.2 evaluates many tasks at the same trace timestamp. Carbon averages
+    and forecasts are deterministic for a frozen dataset/policy, so repeated
+    lookups can be reused without changing scheduler semantics.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._average_cache: dict[tuple[str, int, str], float] = {}
+        self._forecast_cache: dict[tuple[str, int, int, str, int], Any] = {}
+        self.average_cache_hits = 0
+        self.forecast_cache_hits = 0
+
+    @staticmethod
+    def _timestamp_key(value: str | pd.Timestamp) -> int:
+        return int(as_utc_timestamp(value).value)
+
+    def average(
+        self,
+        node_id: str,
+        start_utc: str | pd.Timestamp,
+        duration_seconds: float,
+    ) -> float:
+        key = (
+            node_id,
+            self._timestamp_key(start_utc),
+            float(duration_seconds).hex(),
+        )
+        cached = self._average_cache.get(key)
+        if cached is not None:
+            self.average_cache_hits += 1
+            return cached
+        value = super().average(node_id, start_utc, duration_seconds)
+        self._average_cache[key] = value
+        return value
+
+    def forecast(
+        self,
+        *,
+        node_id: str,
+        observed_at_utc: str | pd.Timestamp,
+        forecast_start_utc: str | pd.Timestamp,
+        duration_seconds: float,
+        policy,
+    ):
+        key = (
+            node_id,
+            self._timestamp_key(observed_at_utc),
+            self._timestamp_key(forecast_start_utc),
+            float(duration_seconds).hex(),
+            id(policy),
+        )
+        cached = self._forecast_cache.get(key)
+        if cached is not None:
+            self.forecast_cache_hits += 1
+            return cached
+        value = super().forecast(
+            node_id=node_id,
+            observed_at_utc=observed_at_utc,
+            forecast_start_utc=forecast_start_utc,
+            duration_seconds=duration_seconds,
+            policy=policy,
+        )
+        self._forecast_cache[key] = value
+        return value
+
+    def cache_summary(self) -> dict[str, int]:
+        return {
+            "average_entries": len(self._average_cache),
+            "average_hits": self.average_cache_hits,
+            "forecast_entries": len(self._forecast_cache),
+            "forecast_hits": self.forecast_cache_hits,
+        }
 
 # Every element is one of the maximal resource packings frozen by Stage 4D.1.
 # Rotating this sequence over the seven nodes changes which site receives which
@@ -333,9 +410,10 @@ def unlimited_task_outcomes(
     edge_rows: list[dict[str, str]],
     arrival_utc: pd.Timestamp,
     scenario_id: str,
+    progress: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for task in layout:
+    for task_index, task in enumerate(layout, start=1):
         calibration = calibrations[task.class_id]
         graph = FrozenCalibrationGraph(
             cluster=cluster,
@@ -378,6 +456,11 @@ def unlimited_task_outcomes(
                 "owner_path": "->".join(outcome.owner_path),
             }
         )
+        if progress is not None:
+            progress(
+                f"unlimited task {task_index}/{len(layout)} "
+                f"{task.task_id} migrations={outcome.migrations}"
+            )
     return rows
 
 
@@ -433,6 +516,8 @@ def replay_capacity_policy(
     arrival_utc: pd.Timestamp,
     scenario_id: str,
     max_elapsed_multiplier: float = 2.0,
+    progress: Callable[[str], None] | None = None,
+    progress_every_rounds: int = 24,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     if policy_label not in CAPACITY_POLICIES:
         raise ValueError(f"Unsupported Stage 4D.2 capacity policy {policy_label}")
@@ -484,6 +569,16 @@ def replay_capacity_policy(
             active = [task for task in tasks.values() if not task.completed]
             if not active:
                 break
+            if (
+                progress is not None
+                and progress_every_rounds > 0
+                and (round_index == 1 or round_index % progress_every_rounds == 0)
+            ):
+                simulated_hours = (round_index - 1) * epoch_seconds / 3600.0
+                progress(
+                    f"round {round_index}/{maximum_rounds} "
+                    f"simulated={simulated_hours:.1f}h active={len(active)}"
+                )
 
             occupancy_start = _occupancy(active)
             for node in cluster.nodes:

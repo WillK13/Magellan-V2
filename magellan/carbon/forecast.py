@@ -109,11 +109,11 @@ class LinearTrendForecastProvider:
             confidence=max(0.0, min(1.0, confidence)),
             freshness=freshness,
             history_points=history_points,
-            forecast_start_utc=forecast_start.to_pydatetime(),
+            forecast_start_utc=forecast_start.to_pydatetime(warn=False),
             forecast_horizon_seconds=duration_seconds,
-            generated_at_utc=observed_at.to_pydatetime(),
+            generated_at_utc=observed_at.to_pydatetime(warn=False),
             latest_sample_at_utc=(
-                latest_sample_at.to_pydatetime()
+                latest_sample_at.to_pydatetime(warn=False)
                 if latest_sample_at is not None
                 else None
             ),
@@ -138,9 +138,14 @@ class LinearTrendForecastProvider:
         forecast_start = _utc(forecast_start_utc)
         duration_seconds = max(0.0, float(duration_seconds))
 
-        history = series.loc[series.index <= observed_at].tail(
-            policy.history_points
-        )
+        # The source series is sorted. Use index search instead of building a
+        # full-length boolean mask for every scheduler forecast. Stage 4D can
+        # issue tens of thousands of forecasts against the same annual trace;
+        # this preserves the exact trailing-history semantics while making the
+        # lookup O(log n) rather than O(n).
+        history_end = int(series.index.searchsorted(observed_at, side="right"))
+        history_start = max(0, history_end - policy.history_points)
+        history = series.iloc[history_start:history_end]
         if history.empty:
             fallback = policy.configured_fallback_g_per_kwh
             if fallback is None:
@@ -283,10 +288,10 @@ class LinearTrendForecastProvider:
             confidence=confidence,
             freshness="fresh",
             history_points=len(history),
-            forecast_start_utc=forecast_start.to_pydatetime(),
+            forecast_start_utc=forecast_start.to_pydatetime(warn=False),
             forecast_horizon_seconds=duration_seconds,
-            generated_at_utc=observed_at.to_pydatetime(),
-            latest_sample_at_utc=latest_at.to_pydatetime(),
+            generated_at_utc=observed_at.to_pydatetime(warn=False),
+            latest_sample_at_utc=latest_at.to_pydatetime(warn=False),
             sample_age_seconds=age_seconds,
             slope_g_per_kwh_per_hour=slope,
             residual_rmse=residual_rmse,
@@ -340,7 +345,7 @@ def forecast_or_average(
         confidence=0.0,
         freshness="unavailable",
         history_points=0,
-        forecast_start_utc=start.to_pydatetime(),
+        forecast_start_utc=start.to_pydatetime(warn=False),
         forecast_horizon_seconds=duration_seconds,
-        generated_at_utc=timestamp.to_pydatetime(),
+        generated_at_utc=timestamp.to_pydatetime(warn=False),
     )

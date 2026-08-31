@@ -182,3 +182,35 @@ def test_capacity_replay_rejects_competing_bid_without_overcommit(monkeypatch) -
         float(row["used_cpu_cores"]) <= float(row["capacity_cpu_cores"]) + 1e-9
         for row in occupancy_rows
     )
+
+
+def test_replay_carbon_store_memoizes_identical_queries() -> None:
+    from magellan.carbon.store import CarbonMetric
+    from magellan.experiments.stage4d2 import ReplayCarbonStore
+
+    cluster = load_cluster_config("config/cluster.gcp.json")
+    policy = load_policy_config("config/policy.prod.json")
+    store = ReplayCarbonStore(cluster, "datasets", carbon_metric=CarbonMetric.LIFECYCLE)
+    at = pd.Timestamp("2024-04-20T12:00:00.123456789Z")
+
+    first_average = store.average("ethiopia", at, 900.0)
+    second_average = store.average("ethiopia", at, 900.0)
+    assert second_average == first_average
+    assert store.average_cache_hits == 1
+
+    first_forecast = store.forecast(
+        node_id="ethiopia",
+        observed_at_utc=at,
+        forecast_start_utc=at,
+        duration_seconds=5400.0,
+        policy=policy.carbon_forecast,
+    )
+    second_forecast = store.forecast(
+        node_id="ethiopia",
+        observed_at_utc=at,
+        forecast_start_utc=at,
+        duration_seconds=5400.0,
+        policy=policy.carbon_forecast,
+    )
+    assert second_forecast is first_forecast
+    assert store.forecast_cache_hits == 1

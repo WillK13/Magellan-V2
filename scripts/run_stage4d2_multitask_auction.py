@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from magellan.bidding.models import AuctionStrategy
-from magellan.carbon.store import CarbonMetric, CarbonStore, as_utc_timestamp
+from magellan.carbon.store import CarbonMetric, as_utc_timestamp
 from magellan.config.loader import load_cluster_config, load_policy_config
 from magellan.experiments.bundle import (
     validate_checksums,
@@ -30,6 +30,7 @@ from magellan.experiments.stage4d2 import (
     CAPACITY_POLICIES,
     CREDIT_FAIR_POLICY,
     LOWEST_SCORE_POLICY,
+    ReplayCarbonStore,
     STATIC_POLICY,
     UNLIMITED_POLICY,
     attach_static_ratios,
@@ -127,7 +128,7 @@ def main() -> int:
 
     cluster = load_cluster_config(args.cluster)
     policy = load_policy_config(args.policy)
-    carbon_store = CarbonStore(cluster, args.datasets, carbon_metric=CarbonMetric.LIFECYCLE)
+    carbon_store = ReplayCarbonStore(cluster, args.datasets, carbon_metric=CarbonMetric.LIFECYCLE)
     capacities, requests = read_resource_model(d41)
     if set(capacities) != {node.id for node in cluster.nodes}:
         raise RuntimeError("Stage 4D.1 node set does not match configured cluster")
@@ -232,6 +233,7 @@ def main() -> int:
             edge_rows=edge_rows,
             arrival_utc=arrival,
             scenario_id=scenario_id,
+            progress=lambda message: print(f"    [unlimited] {message}", flush=True),
         )
         all_task_rows.extend(unlimited_rows)
         unlimited_outcome = scenario_outcome_row(
@@ -265,6 +267,10 @@ def main() -> int:
                 edge_rows=edge_rows,
                 arrival_utc=arrival,
                 scenario_id=scenario_id,
+                progress=lambda message, strategy=strategy: print(
+                    f"    [{strategy.value}] {message}",
+                    flush=True,
+                ),
             )
             all_task_rows.extend(task_rows)
             all_auction_rows.extend(auction_rows)
@@ -400,6 +406,15 @@ def main() -> int:
     write_json(root / "metadata.json", metadata)
     write_json(root / "summary.json", summary)
     write_checksums(root)
+
+    cache = carbon_store.cache_summary()
+    print(
+        "carbon_cache: "
+        f"forecast_hits={cache['forecast_hits']} "
+        f"forecast_entries={cache['forecast_entries']} "
+        f"average_hits={cache['average_hits']} "
+        f"average_entries={cache['average_entries']}"
+    )
 
     marker = "STAGE_4D2_MULTITASK_AUCTION_PASS" if passed else "STAGE_4D2_MULTITASK_AUCTION_FAIL"
     print(f"\n{marker}")

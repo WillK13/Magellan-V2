@@ -123,9 +123,15 @@ class CarbonStore:
         if timestamp in series.index:
             return float(series.loc[timestamp])
 
-        expanded_index = series.index.union(pd.DatetimeIndex([timestamp]))
+        # Interpolation only depends on the two source samples surrounding the
+        # requested timestamp. Avoid reindexing/interpolating the full annual
+        # trace for every scheduler lookup.
+        right = int(series.index.searchsorted(timestamp, side="right"))
+        left = right - 1
+        local = series.iloc[left : right + 1]
+        expanded_index = local.index.union(pd.DatetimeIndex([timestamp]))
         interpolated = (
-            series.reindex(expanded_index)
+            local.reindex(expanded_index)
             .sort_index()
             .interpolate(method="time")
         )
@@ -165,9 +171,21 @@ class CarbonStore:
         if sample_index.empty:
             return self.value_at(node_id, start)
 
-        expanded_index = series.index.union(sample_index)
+        # Only samples bracketing this window can affect time interpolation.
+        # Restricting to the local slice preserves the exact minute-sampled
+        # average while avoiding a full annual-trace reindex on every 15-minute
+        # Stage 4 replay segment.
+        first = sample_index[0]
+        last = sample_index[-1]
+        left = max(0, int(series.index.searchsorted(first, side="right")) - 1)
+        right = min(
+            len(series) - 1,
+            int(series.index.searchsorted(last, side="left")),
+        )
+        local = series.iloc[left : right + 1]
+        expanded_index = local.index.union(sample_index)
         interpolated = (
-            series.reindex(expanded_index)
+            local.reindex(expanded_index)
             .sort_index()
             .interpolate(method="time")
         )

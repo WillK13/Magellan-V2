@@ -329,7 +329,7 @@ def evaluate_task(
 
     adaptive_context = None
     if adaptive_service is not None:
-        timestamp = as_utc_timestamp(at_utc).to_pydatetime()
+        timestamp = as_utc_timestamp(at_utc).to_pydatetime(warn=False)
         peer_count = len(graph.peers(task.current_node_id))
         migration_count = sum(
             item.action == ActionType.MIGRATE for item in estimates
@@ -375,7 +375,7 @@ def evaluate_task(
     )
 
     if adaptive_context is not None:
-        timestamp = as_utc_timestamp(at_utc).to_pydatetime()
+        timestamp = as_utc_timestamp(at_utc).to_pydatetime(warn=False)
         state = adaptive_service.record_decision(
             decision,
             adaptive_context,
