@@ -168,27 +168,31 @@ def execute_control_plane_epoch(
 
     decision_start = time.perf_counter_ns()
     decisions = []
-    for task in tasks:
-        decisions.append(
-            (
-                task,
-                evaluate_task(
-                    task=task.profile,
-                    cluster=cluster,
-                    policy=policy,
-                    graph=task.graph,  # type: ignore[arg-type]
-                    carbon_store=carbon_store,
-                    at_utc=at_utc,
-                    static_data_bytes_by_destination={
-                        node_id: 0
-                        for node_id in all_node_ids - {task.profile.current_node_id}
-                    },
-                    adaptive_service=adaptive_service,
-                    telemetry_confidence=telemetry_confidence,
-                    compatible_destination_ids=all_node_ids - {task.profile.current_node_id},
-                ),
+    # Match the real daemon's epoch semantics: task-local adaptive updates are
+    # accumulated in memory and atomically persisted once when the batch exits.
+    # The final durable flush remains inside the measured decision wall time.
+    with adaptive_service.store.batch():
+        for task in tasks:
+            decisions.append(
+                (
+                    task,
+                    evaluate_task(
+                        task=task.profile,
+                        cluster=cluster,
+                        policy=policy,
+                        graph=task.graph,  # type: ignore[arg-type]
+                        carbon_store=carbon_store,
+                        at_utc=at_utc,
+                        static_data_bytes_by_destination={
+                            node_id: 0
+                            for node_id in all_node_ids - {task.profile.current_node_id}
+                        },
+                        adaptive_service=adaptive_service,
+                        telemetry_confidence=telemetry_confidence,
+                        compatible_destination_ids=all_node_ids - {task.profile.current_node_id},
+                    ),
+                )
             )
-        )
     decision_end = time.perf_counter_ns()
 
     auction_start = time.perf_counter_ns()

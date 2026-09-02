@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -818,20 +819,26 @@ class SchedulerService:
 
         trace_time = self._clock.now()
 
-        for task_id in task_ids:
-            try:
-                await self._evaluate_task(
-                    task_id,
-                    trace_time,
-                )
-            except Exception as exc:
-                print(
-                    f"[scheduler-error] node="
-                    f"{self._local_node.id} "
-                    f"task={task_id} "
-                    f"error={type(exc).__name__}: {exc}",
-                    flush=True,
-                )
+        adaptive_batch = (
+            self._adaptive_policy_service.store.batch()
+            if self._adaptive_policy_service is not None
+            else nullcontext()
+        )
+        with adaptive_batch:
+            for task_id in task_ids:
+                try:
+                    await self._evaluate_task(
+                        task_id,
+                        trace_time,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[scheduler-error] node="
+                        f"{self._local_node.id} "
+                        f"task={task_id} "
+                        f"error={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
 
     async def run(
         self,
