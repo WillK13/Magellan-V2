@@ -951,6 +951,23 @@ async def start_task(task_id: str) -> dict:
     return state.model_dump(mode="json")
 
 
+@app.post("/tasks/{task_id}/evaluate")
+async def evaluate_task_once(
+    task_id: str,
+    trace_time_utc: datetime | None = None,
+) -> dict:
+    """Run one explicit production scheduler evaluation on the owning daemon."""
+    try:
+        return await context.scheduler_service.request_evaluation(
+            task_id=task_id,
+            trace_time_utc=trace_time_utc,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/tasks/{task_id}/pause")
 async def pause_task(
     task_id: str,

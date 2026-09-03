@@ -13,7 +13,7 @@ from magellan.bidding.models import (
     BidStatus,
     TaskBidContext,
 )
-from magellan.carbon.store import CarbonStore
+from magellan.carbon.store import CarbonStore, as_utc_timestamp
 from magellan.config.models import (
     ClusterConfig,
     NodeConfig,
@@ -514,6 +514,42 @@ class SchedulerService:
                 migration_at_utc=trace_time.to_pydatetime(),
                 bid_id=result.bid_id,
             )
+
+    async def request_evaluation(
+        self,
+        task_id: str,
+        trace_time_utc=None,
+    ) -> dict:
+        """Run one explicit production scheduler evaluation for a local task.
+
+        This operator trigger is intended for controlled distributed experiments.
+        It uses the exact normal scoring/bidding/migration path but bypasses the
+        background-scheduler label gate so an ``operator_only`` task can be
+        evaluated at a reproducible instant without racing the 15-minute loop.
+        """
+        async with self._task_operation_lock(task_id):
+            state = self._registry.get_state(task_id)
+            if state.owner_node_id != self._local_node.id:
+                raise RuntimeError(
+                    f"Cannot evaluate {task_id}; owner is {state.owner_node_id}"
+                )
+            if state.status != TaskStatus.RUNNING:
+                raise RuntimeError(
+                    f"Cannot evaluate {task_id}; status is {state.status.value}"
+                )
+
+            trace_time = (
+                self._clock.now()
+                if trace_time_utc is None
+                else as_utc_timestamp(trace_time_utc)
+            )
+            await self._evaluate_task_locked(task_id, trace_time)
+            return {
+                "node_id": self._local_node.id,
+                "task_id": task_id,
+                "trace_time_utc": trace_time.isoformat(),
+                "state": self._registry.get_state(task_id).model_dump(mode="json"),
+            }
 
     async def request_pause(
         self,
