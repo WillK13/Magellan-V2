@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -152,6 +153,8 @@ async def health() -> dict:
 
     return {
         "status": "ok",
+        "deployment_git_sha": os.environ.get("MAGELLAN_GIT_SHA"),
+        "deployment_git_branch": os.environ.get("MAGELLAN_GIT_BRANCH"),
         "node_id": context.local_node.id,
         "node_name": context.local_node.name,
         "vm_name": context.local_node.vm_name,

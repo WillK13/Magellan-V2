@@ -13,6 +13,11 @@ if [[ -z "$NODE_ID" ]]; then
 fi
 
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
+GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+GIT_BRANCH="$(git -C "$REPO_ROOT" branch --show-current)"
+if [[ -z "$GIT_BRANCH" ]]; then
+  GIT_BRANCH="DETACHED"
+fi
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TMP_FILE="$(mktemp)"
 trap 'rm -f "$TMP_FILE"' EXIT
@@ -28,6 +33,8 @@ Type=simple
 User=${RUN_USER}
 WorkingDirectory=${REPO_ROOT}
 Environment=MAGELLAN_NODE_ID=${NODE_ID}
+Environment=MAGELLAN_GIT_SHA=${GIT_SHA}
+Environment=MAGELLAN_GIT_BRANCH=${GIT_BRANCH}
 Environment=MAGELLAN_CONFIG=config/cluster.gcp.json
 Environment=MAGELLAN_POLICY=config/policy.prod.json
 Environment=MAGELLAN_DATASETS=datasets
