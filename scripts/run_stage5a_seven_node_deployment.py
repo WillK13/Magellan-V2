@@ -131,7 +131,7 @@ if [[ "$REMOTE_SHA" != {shlex.quote(target_sha)} ]]; then
 fi
 git switch -C {shlex.quote(branch)} {shlex.quote('origin/' + branch)}
 test "$(git rev-parse HEAD)" = {shlex.quote(target_sha)}
-python -m compileall -q magellan scripts
+.venv/bin/python -m compileall -q magellan scripts
 scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
 sudo systemctl is-active --quiet {shlex.quote(service)}
 curl -fsS --retry 20 --retry-delay 1 --retry-connrefused http://127.0.0.1:8040/health >/dev/null
