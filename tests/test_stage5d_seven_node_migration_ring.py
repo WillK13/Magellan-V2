@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from magellan.experiments.stage5d import (
     STAGE5D_RING,
+    durable_checkpoint_continuity,
     expected_hops,
     progress_is_monotonic,
     stage5d_passes,
@@ -25,8 +26,16 @@ def _hop_rows() -> list[dict]:
                 "generation_after": index,
                 "destination_status_after": "running",
                 "destination_pid_after": 1000 + index,
+                "registry_progress_before": 1000.0 + index,
+                "registry_progress_after": 1.0,
+                "source_checkpoint_value": 10.0 + index,
+                "source_progress_value": 10.0 + index,
+                "source_stopped_value": 10.0 + index,
+                "destination_resume_value": 10.0 + index,
+                "destination_checkpoint_value": 11.0 + index,
+                "destination_progress_value": 11.0 + index,
                 "progress_before": 10.0 + index,
-                "progress_after": 11.0 + index,
+                "progress_after": 10.0 + index,
                 "source_record_role": "source",
                 "source_record_status": "activated",
                 "destination_record_role": "destination",
@@ -69,6 +78,28 @@ def test_stage5d_passes_complete_ring() -> None:
 def test_stage5d_rejects_generation_skip() -> None:
     rows = _hop_rows()
     rows[3]["generation_after"] = 5
+    assert not stage5d_passes(
+        hop_rows=rows,
+        final_owner_node_id="boston",
+        final_generation=7,
+        ownership_converged_final=True,
+        expected_git_sha="a" * 40,
+    )
+
+
+def test_registry_progress_regression_is_diagnostic_only() -> None:
+    rows = _hop_rows()
+    rows[6]["registry_progress_before"] = 355.0
+    rows[6]["registry_progress_after"] = 335.0
+    assert progress_is_monotonic(rows)
+    assert durable_checkpoint_continuity(rows[6])
+
+
+def test_stage5d_rejects_checkpoint_resume_mismatch() -> None:
+    rows = _hop_rows()
+    rows[6]["destination_resume_value"] -= 1.0
+    rows[6]["progress_after"] -= 1.0
+    assert not durable_checkpoint_continuity(rows[6])
     assert not stage5d_passes(
         hop_rows=rows,
         final_owner_node_id="boston",

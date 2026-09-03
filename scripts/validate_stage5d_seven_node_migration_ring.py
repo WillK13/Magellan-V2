@@ -7,7 +7,12 @@ import json
 from pathlib import Path
 
 from magellan.experiments.bundle import validate_checksums
-from magellan.experiments.stage5d import STAGE5D_RING, expected_hops, progress_is_monotonic
+from magellan.experiments.stage5d import (
+    STAGE5D_RING,
+    durable_checkpoint_continuity,
+    expected_hops,
+    progress_is_monotonic,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,6 +40,8 @@ def main() -> int:
         "migration_journals.jsonl",
         "initial_state.json",
         "final_state.json",
+        "initial_artifacts.json",
+        "final_artifacts.json",
         "checksums.sha256",
     ]
     for name in required:
@@ -90,6 +97,10 @@ def main() -> int:
             errors.append(f"hop {index} ownership did not converge")
         if float(row["total_downtime_seconds"]) <= 0:
             errors.append(f"hop {index} downtime is not positive")
+        if not durable_checkpoint_continuity(row):
+            errors.append(
+                f"hop {index} durable checkpoint/resume continuity failed"
+            )
         migration_id = row["migration_id"]
         if not migration_id or migration_id in migration_ids:
             errors.append(f"hop {index} migration id missing/duplicate")
@@ -138,6 +149,7 @@ def main() -> int:
     print("destination_nodes: 7/7")
     print("source_journals_activated: 7/7")
     print("destination_journals_activated: 7/7")
+    print("durable_checkpoint_continuity: 7/7")
     print("progress_monotonic: True")
     print("final_owner: boston")
     print("final_generation: 7")

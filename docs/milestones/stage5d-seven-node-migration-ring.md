@@ -81,3 +81,21 @@ No downtime threshold is a PASS criterion.
 - `metadata.json`
 - `summary.json`
 - `checksums.sha256`
+
+
+## Durable progress evidence
+
+Stage 5D grades application-state continuity at the migration boundary rather
+than from the scheduler registry's periodically refreshed progress field. For
+every hop, after the source process has stopped, the runner reads the counter's
+durable checkpoint, progress file, and final `stopped value` from that node's
+effective `MAGELLAN_STATE_ROOT`. It then reads the destination process log and
+requires its latest `resumed value` to equal the source checkpoint exactly.
+The destination checkpoint and progress file may be greater because the task is
+already running again.
+
+Registry `progress_completed_units` remains in `hops.csv` as diagnostic
+accounting telemetry (`registry_progress_before` / `registry_progress_after`)
+but is not used as the checkpoint-continuity oracle. This distinction matters
+on fast migrations because accounting refresh can lag the already-restored
+application state.

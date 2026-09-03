@@ -26,6 +26,14 @@ def _float_or_none(value: Any) -> float | None:
 
 
 def progress_is_monotonic(hop_rows: list[dict[str, Any]]) -> bool:
+    """Validate durable migration-boundary progress, not lagging registry telemetry.
+
+    ``progress_before`` is the source checkpoint value captured after the source
+    process has stopped. ``progress_after`` is the destination's logged resume
+    value. Registry/accounting progress is intentionally recorded in separate
+    diagnostic columns and is not used for this invariant.
+    """
+
     observed: list[float] = []
     for row in hop_rows:
         before = _float_or_none(row.get("progress_before"))
@@ -40,6 +48,49 @@ def progress_is_monotonic(hop_rows: list[dict[str, Any]]) -> bool:
         later + 1e-9 >= earlier
         for earlier, later in zip(observed, observed[1:])
     )
+
+
+def durable_checkpoint_continuity(row: dict[str, Any]) -> bool:
+    """Check one counter migration at the durable stop/restore boundary."""
+
+    source_checkpoint = _float_or_none(row.get("source_checkpoint_value"))
+    source_progress = _float_or_none(row.get("source_progress_value"))
+    source_stopped = _float_or_none(row.get("source_stopped_value"))
+    destination_resume = _float_or_none(row.get("destination_resume_value"))
+    destination_checkpoint = _float_or_none(
+        row.get("destination_checkpoint_value")
+    )
+    destination_progress = _float_or_none(row.get("destination_progress_value"))
+
+    values = (
+        source_checkpoint,
+        source_progress,
+        source_stopped,
+        destination_resume,
+        destination_checkpoint,
+        destination_progress,
+    )
+    if any(value is None for value in values):
+        return False
+
+    assert source_checkpoint is not None
+    assert source_progress is not None
+    assert source_stopped is not None
+    assert destination_resume is not None
+    assert destination_checkpoint is not None
+    assert destination_progress is not None
+
+    if abs(source_checkpoint - source_progress) > 1e-9:
+        return False
+    if abs(source_checkpoint - source_stopped) > 1e-9:
+        return False
+    if abs(source_checkpoint - destination_resume) > 1e-9:
+        return False
+    if destination_checkpoint + 1e-9 < destination_resume:
+        return False
+    if destination_progress + 1e-9 < destination_resume:
+        return False
+    return True
 
 
 def stage5d_passes(
@@ -99,6 +150,8 @@ def stage5d_passes(
             return False
         seen_migration_ids.add(migration_id)
         if float(row.get("total_downtime_seconds") or 0) <= 0:
+            return False
+        if not durable_checkpoint_continuity(row):
             return False
 
     if not progress_is_monotonic(hop_rows):

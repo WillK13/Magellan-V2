@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -266,8 +268,81 @@ def migration_event(
     return None
 
 
+def counter_artifacts(
+    node: Any,
+    task_id: str,
+    *,
+    ssh_user: str,
+) -> dict[str, Any]:
+    """Read durable counter artifacts from the node's effective state root."""
+
+    quoted_task = shlex.quote(task_id)
+    script = f"""set -euo pipefail
+ROOT=\"$(sudo systemctl show magellan --property=Environment --value \\
+  | tr ' ' '\\n' \\
+  | sed -n 's/^MAGELLAN_STATE_ROOT=//p' \\
+  | tail -1)\"
+test -n \"$ROOT\"
+TASK_DIR=\"$ROOT/tasks/{quoted_task}\"
+python3 - \"$ROOT\" \"$TASK_DIR\" <<'PY_ARTIFACT'
+import json
+import pathlib
+import re
+import sys
+
+root = sys.argv[1]
+task_dir = pathlib.Path(sys.argv[2])
+checkpoint_path = task_dir / "checkpoint" / "counter.json"
+progress_path = task_dir / "runtime" / "progress.json"
+log_path = task_dir / "logs" / "process.log"
+
+checkpoint = json.loads(checkpoint_path.read_text())
+progress = json.loads(progress_path.read_text())
+log_text = log_path.read_text()
+resumed = [int(v) for v in re.findall(r"\\[counter\\] resumed value=(\\d+)", log_text)]
+stopped = [int(v) for v in re.findall(r"\\[counter\\] stopped value=(\\d+)", log_text)]
+
+print(json.dumps({
+    "state_root": root,
+    "checkpoint_value": checkpoint.get("value"),
+    "checkpoint_node_id": checkpoint.get("node_id"),
+    "checkpoint_updated_at_unix": checkpoint.get("updated_at_unix"),
+    "progress_value": progress.get("completed_units"),
+    "progress_node_id": progress.get("node_id"),
+    "progress_updated_at_utc": progress.get("updated_at_utc"),
+    "last_resumed_value": resumed[-1] if resumed else None,
+    "last_stopped_value": stopped[-1] if stopped else None,
+}))
+PY_ARTIFACT
+"""
+
+    if str(node.id) == "boston":
+        result = subprocess.run(
+            ["bash", "-lc", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=10",
+                f"{ssh_user}@{node.internal_ip}",
+                "bash", "-s",
+            ],
+            input=script,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    return json.loads(result.stdout)
+
+
 def main() -> int:
     args = parse_args()
+    ssh_user = os.getenv("MAGELLAN_SSH_USER", "WILL")
     s5a_path = Path(args.stage5a_bundle)
     s5c_path = Path(args.stage5c_bundle)
     s5a = require_bundle(s5a_path, "Stage 5A")
@@ -367,9 +442,13 @@ def main() -> int:
         task_id,
         args.convergence_timeout_seconds,
     )
+    initial_artifacts = counter_artifacts(
+        node_by_id["boston"], task_id, ssh_user=ssh_user
+    )
     print(
         f"[initial] generation={initial_state.get('generation')} "
-        f"progress={initial_state.get('progress_completed_units')} "
+        f"registry_progress={initial_state.get('progress_completed_units')} "
+        f"checkpoint={initial_artifacts.get('checkpoint_value')} "
         f"pid={initial_state.get('pid')}"
     )
 
@@ -417,11 +496,17 @@ def main() -> int:
         if not migration_id:
             raise RuntimeError(f"Hop {hop_index} missing migration id: {response}")
 
+        source_artifacts = counter_artifacts(
+            node_by_id[source_id], task_id, ssh_user=ssh_user
+        )
         time.sleep(args.post_hop_settle_seconds)
         after = wait_running_progress(
             destination_api,
             task_id,
             args.convergence_timeout_seconds,
+        )
+        destination_artifacts = counter_artifacts(
+            node_by_id[destination_id], task_id, ssh_user=ssh_user
         )
         ownership_ok, ownership_rows, snapshots = wait_ownership_one(
             cluster,
@@ -462,7 +547,12 @@ def main() -> int:
             "generation_before": before.get("generation"),
             "source_status_before": before.get("status"),
             "source_pid_before": before.get("pid"),
-            "progress_before": before.get("progress_completed_units"),
+            "registry_progress_before": before.get("progress_completed_units"),
+            "source_state_root": source_artifacts.get("state_root"),
+            "source_checkpoint_value": source_artifacts.get("checkpoint_value"),
+            "source_progress_value": source_artifacts.get("progress_value"),
+            "source_stopped_value": source_artifacts.get("last_stopped_value"),
+            "progress_before": source_artifacts.get("checkpoint_value"),
             "migrated": bool(response.get("migrated")),
             "already_migrated": bool(response.get("already_migrated", False)),
             "bid_id": bid.get("bid_id", ""),
@@ -479,7 +569,12 @@ def main() -> int:
             "generation_after": after.get("generation"),
             "destination_status_after": after.get("status"),
             "destination_pid_after": after.get("pid"),
-            "progress_after": after.get("progress_completed_units"),
+            "registry_progress_after": after.get("progress_completed_units"),
+            "destination_state_root": destination_artifacts.get("state_root"),
+            "destination_resume_value": destination_artifacts.get("last_resumed_value"),
+            "destination_checkpoint_value": destination_artifacts.get("checkpoint_value"),
+            "destination_progress_value": destination_artifacts.get("progress_value"),
+            "progress_after": destination_artifacts.get("last_resumed_value"),
             "source_record_role": source_record.get("role"),
             "source_record_status": source_record.get("status"),
             "destination_record_role": destination_record.get("role"),
@@ -492,7 +587,10 @@ def main() -> int:
         print(
             f"  complete migration={migration_id[:12]} "
             f"generation={after.get('generation')} "
-            f"progress={after.get('progress_completed_units')} "
+            f"checkpoint={source_artifacts.get('checkpoint_value')} "
+            f"resume={destination_artifacts.get('last_resumed_value')} "
+            f"registry={before.get('progress_completed_units')}->"
+            f"{after.get('progress_completed_units')} "
             f"downtime={float(payload.get('total_downtime_seconds') or 0):.3f}s "
             f"ownership_converged={ownership_ok}",
             flush=True,
@@ -508,6 +606,9 @@ def main() -> int:
         boston_api,
         task_id,
         args.convergence_timeout_seconds,
+    )
+    final_artifacts = counter_artifacts(
+        node_by_id["boston"], task_id, ssh_user=ssh_user
     )
 
     passed = stage5d_passes(
@@ -534,8 +635,10 @@ def main() -> int:
         "final_generation": final.get("generation"),
         "final_status": final_state.get("status"),
         "final_pid": final_state.get("pid"),
-        "initial_progress_completed_units": initial_state.get("progress_completed_units"),
-        "final_progress_completed_units": final_state.get("progress_completed_units"),
+        "initial_registry_progress_completed_units": initial_state.get("progress_completed_units"),
+        "final_registry_progress_completed_units": final_state.get("progress_completed_units"),
+        "initial_progress_completed_units": initial_artifacts.get("checkpoint_value"),
+        "final_progress_completed_units": final_artifacts.get("checkpoint_value"),
         "ownership_converged_final": final_ok,
         "total_downtime_seconds": sum(
             float(row["total_downtime_seconds"] or 0) for row in hop_rows
@@ -590,6 +693,8 @@ def main() -> int:
     write_jsonl(root / "migration_journals.jsonl", all_journals)
     write_json(root / "initial_state.json", initial_state)
     write_json(root / "final_state.json", final_state)
+    write_json(root / "initial_artifacts.json", initial_artifacts)
+    write_json(root / "final_artifacts.json", final_artifacts)
     write_json(root / "metadata.json", metadata)
     write_json(root / "summary.json", summary)
     write_checksums(root)
