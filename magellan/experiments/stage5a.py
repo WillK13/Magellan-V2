@@ -39,6 +39,7 @@ def stage5a_passes(
     dataset_rows: list[dict[str, Any]],
     mesh_rows: list[dict[str, Any]],
     expected_git_sha: str,
+    require_effective_environment: bool = False,
 ) -> bool:
     expected_nodes = EXPECTED_STAGE5A_NODE_IDS
     observed_nodes = {str(row["node_id"]) for row in node_rows}
@@ -60,6 +61,21 @@ def stage5a_passes(
             return False
         if str(row.get("health_node_id")) != str(row.get("node_id")):
             return False
+        if require_effective_environment:
+            if not bool(row.get("effective_environment_ok")):
+                return False
+            if int(row.get("systemd_dropin_count", -1)) != 0:
+                return False
+            if not bool(row.get("state_root_exists")):
+                return False
+            if not bool(row.get("state_root_writable")):
+                return False
+            if not bool(row.get("remote_state_root_exists")):
+                return False
+            if not bool(row.get("remote_state_root_writable")):
+                return False
+            if str(row.get("health_carbon_metric")) != "lifecycle":
+                return False
 
     if len({str(row["cluster_sha256"]) for row in node_rows}) != 1:
         return False

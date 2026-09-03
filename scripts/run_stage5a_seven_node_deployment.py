@@ -132,7 +132,7 @@ fi
 git switch -C {shlex.quote(branch)} {shlex.quote('origin/' + branch)}
 test "$(git rev-parse HEAD)" = {shlex.quote(target_sha)}
 .venv/bin/python -m compileall -q magellan scripts
-scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
+MAGELLAN_CLEAR_SYSTEMD_DROPINS=1 MAGELLAN_PREPARE_STATE_ROOT=1 MAGELLAN_INSTALL_CARBON_METRIC=lifecycle scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
 sudo systemctl is-active --quiet {shlex.quote(service)}
 curl -fsS --retry 20 --retry-delay 1 --retry-connrefused http://127.0.0.1:8040/health >/dev/null
 echo STAGE5A_NODE_DEPLOYED node={shlex.quote(node_id)} sha=$(git rev-parse HEAD)
@@ -142,7 +142,7 @@ echo STAGE5A_NODE_DEPLOYED node={shlex.quote(node_id)} sha=$(git rev-parse HEAD)
 def local_restart_command(*, node_id: str, service: str) -> str:
     return f"""
 set -euo pipefail
-scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
+MAGELLAN_CLEAR_SYSTEMD_DROPINS=1 MAGELLAN_PREPARE_STATE_ROOT=1 MAGELLAN_INSTALL_CARBON_METRIC=lifecycle scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
 sudo systemctl is-active --quiet {shlex.quote(service)}
 curl -fsS --retry 20 --retry-delay 1 --retry-connrefused http://127.0.0.1:8040/health >/dev/null
 """.strip()
@@ -312,6 +312,23 @@ def main() -> int:
                 "cluster_sha256": payload["cluster_sha256"],
                 "policy_sha256": payload["policy_sha256"],
                 "python_version": payload["python_version"],
+                "health_carbon_metric": payload["health_carbon_metric"],
+                "effective_environment_ok": payload["effective_environment_ok"],
+                "systemd_dropin_count": payload["systemd_dropin_count"],
+                "effective_node_id": payload["effective_environment"].get("MAGELLAN_NODE_ID", ""),
+                "effective_git_sha": payload["effective_environment"].get("MAGELLAN_GIT_SHA", ""),
+                "effective_git_branch": payload["effective_environment"].get("MAGELLAN_GIT_BRANCH", ""),
+                "effective_config": payload["effective_environment"].get("MAGELLAN_CONFIG", ""),
+                "effective_policy": payload["effective_environment"].get("MAGELLAN_POLICY", ""),
+                "effective_datasets": payload["effective_environment"].get("MAGELLAN_DATASETS", ""),
+                "effective_carbon_metric": payload["effective_environment"].get("MAGELLAN_CARBON_METRIC", ""),
+                "effective_state_root": payload["effective_environment"].get("MAGELLAN_STATE_ROOT", ""),
+                "effective_remote_state_root": payload["effective_environment"].get("MAGELLAN_REMOTE_STATE_ROOT", ""),
+                "effective_repository_root": payload["effective_environment"].get("MAGELLAN_REPOSITORY_ROOT", ""),
+                "state_root_exists": payload["state_root_exists"],
+                "state_root_writable": payload["state_root_writable"],
+                "remote_state_root_exists": payload["remote_state_root_exists"],
+                "remote_state_root_writable": payload["remote_state_root_writable"],
             }
         )
         for item in payload["dataset_hashes"]:
@@ -327,7 +344,9 @@ def main() -> int:
             f"  sha={payload['repo_git_sha'][:12]} "
             f"daemon_sha={str(payload['daemon_git_sha'])[:12]} "
             f"service={'active' if payload['service_active'] else 'inactive'} "
-            f"capabilities={'ready' if payload['capabilities_ready'] else 'drift'}",
+            f"capabilities={'ready' if payload['capabilities_ready'] else 'drift'} "
+            f"env={'exact' if payload['effective_environment_ok'] else 'drift'} "
+            f"dropins={payload['systemd_dropin_count']}",
             flush=True,
         )
 
@@ -362,6 +381,7 @@ def main() -> int:
         dataset_rows=dataset_rows,
         mesh_rows=mesh_rows,
         expected_git_sha=target_sha,
+        require_effective_environment=True,
     )
 
     comparison_id = args.comparison_id or (
@@ -397,9 +417,23 @@ def main() -> int:
             bool(row["capabilities_ready"]) for row in node_rows
         ),
         "dataset_manifest_rows": len(dataset_rows),
+        "effective_environment_nodes": sum(
+            bool(row["effective_environment_ok"]) for row in node_rows
+        ),
+        "zero_dropin_nodes": sum(
+            int(row["systemd_dropin_count"]) == 0 for row in node_rows
+        ),
+        "lifecycle_carbon_nodes": sum(
+            row["health_carbon_metric"] == "lifecycle" for row in node_rows
+        ),
+        "writable_state_root_nodes": sum(
+            bool(row["state_root_writable"])
+            and bool(row["remote_state_root_writable"])
+            for row in node_rows
+        ),
     }
     metadata = {
-        "format_version": 1,
+        "format_version": 2,
         "measurement_type": "stage5a_real_seven_node_deployment",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "methodology": {
@@ -413,6 +447,20 @@ def main() -> int:
                 "the repository used to install it. /health exposes those values, so "
                 "Stage 5A verifies both the on-disk repository SHA and the running "
                 "daemon SHA against one exact target commit."
+            ),
+            "effective_runtime_environment": (
+                "Stage 5A deploy mode removes systemd drop-ins, prepares a clean "
+                "production runtime-state-gcp root when transitioning away from an "
+                "older mode-specific root, and installs lifecycle carbon accounting "
+                "explicitly in the canonical unit. The probe verifies the effective "
+                "systemd environment rather than trusting the unit file alone."
+            ),
+            "state_preservation": (
+                "If the daemon is transitioning from a different state root, deploy "
+                "first requires zero active tasks. Any non-empty inactive prior "
+                "runtime-state-gcp directory is renamed to a timestamped "
+                "pre-stage5a1 archive before the clean production root is created. "
+                "The old active mode-specific root is left untouched."
             ),
             "input_identity": (
                 "Every node hashes cluster.gcp.json, policy.prod.json, and all seven "
@@ -456,6 +504,11 @@ def main() -> int:
         f"{summary['ssh_paths_ok']}/{len(mesh_rows)} SSH/rsync"
     )
     print(f"capabilities_ready: {summary['capabilities_ready_nodes']}/{len(node_rows)}")
+    print(
+        f"effective_environment: {summary['effective_environment_nodes']}/{len(node_rows)} exact, "
+        f"dropins={summary['zero_dropin_nodes']}/{len(node_rows)} clean, "
+        f"lifecycle={summary['lifecycle_carbon_nodes']}/{len(node_rows)}"
+    )
     print(f"dataset_manifest_rows: {len(dataset_rows)}")
     return 0 if passed else 2
 

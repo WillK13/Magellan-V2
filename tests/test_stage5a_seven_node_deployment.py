@@ -115,3 +115,67 @@ def test_stage5a_rejects_divergent_dataset_hash() -> None:
         mesh_rows=_mesh_rows(),
         expected_git_sha=sha,
     )
+
+
+def _hardened_node_rows(sha: str) -> list[dict]:
+    rows = _node_rows(sha)
+    for row in rows:
+        row.update(
+            {
+                "effective_environment_ok": True,
+                "systemd_dropin_count": 0,
+                "state_root_exists": True,
+                "state_root_writable": True,
+                "remote_state_root_exists": True,
+                "remote_state_root_writable": True,
+                "health_carbon_metric": "lifecycle",
+            }
+        )
+    return rows
+
+
+def test_stage5a_hardened_passes_exact_effective_environment() -> None:
+    sha = "a" * 40
+    assert stage5a_passes(
+        node_rows=_hardened_node_rows(sha),
+        dataset_rows=_dataset_rows(),
+        mesh_rows=_mesh_rows(),
+        expected_git_sha=sha,
+        require_effective_environment=True,
+    )
+
+
+def test_stage5a_hardened_rejects_effective_environment_drift() -> None:
+    sha = "a" * 40
+    nodes = _hardened_node_rows(sha)
+    nodes[0]["effective_environment_ok"] = False
+    assert not stage5a_passes(
+        node_rows=nodes,
+        dataset_rows=_dataset_rows(),
+        mesh_rows=_mesh_rows(),
+        expected_git_sha=sha,
+        require_effective_environment=True,
+    )
+
+
+def test_stage5a_hardened_rejects_dropin_or_direct_carbon() -> None:
+    sha = "a" * 40
+    nodes = _hardened_node_rows(sha)
+    nodes[0]["systemd_dropin_count"] = 1
+    assert not stage5a_passes(
+        node_rows=nodes,
+        dataset_rows=_dataset_rows(),
+        mesh_rows=_mesh_rows(),
+        expected_git_sha=sha,
+        require_effective_environment=True,
+    )
+
+    nodes = _hardened_node_rows(sha)
+    nodes[0]["health_carbon_metric"] = "direct"
+    assert not stage5a_passes(
+        node_rows=nodes,
+        dataset_rows=_dataset_rows(),
+        mesh_rows=_mesh_rows(),
+        expected_git_sha=sha,
+        require_effective_environment=True,
+    )

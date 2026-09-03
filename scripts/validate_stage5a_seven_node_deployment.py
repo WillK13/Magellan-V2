@@ -52,21 +52,31 @@ def main() -> int:
         return 2
 
     summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+    hardened = int(metadata.get("format_version", 1)) >= 2
     nodes_raw = read_csv(root / "nodes.csv")
     datasets = read_csv(root / "dataset_hashes.csv")
     mesh_raw = read_csv(root / "directed_mesh.csv")
     target_sha = str(summary.get("target_git_sha") or "")
 
-    nodes = [
-        row
-        | {
+    nodes = []
+    for row in nodes_raw:
+        parsed = row | {
             "tracked_worktree_clean": truthy(row["tracked_worktree_clean"]),
             "service_active": truthy(row["service_active"]),
             "health_ok": truthy(row["health_ok"]),
             "capabilities_ready": truthy(row["capabilities_ready"]),
         }
-        for row in nodes_raw
-    ]
+        if hardened:
+            parsed |= {
+                "effective_environment_ok": truthy(row["effective_environment_ok"]),
+                "systemd_dropin_count": int(row["systemd_dropin_count"]),
+                "state_root_exists": truthy(row["state_root_exists"]),
+                "state_root_writable": truthy(row["state_root_writable"]),
+                "remote_state_root_exists": truthy(row["remote_state_root_exists"]),
+                "remote_state_root_writable": truthy(row["remote_state_root_writable"]),
+            }
+        nodes.append(parsed)
     mesh = [
         row
         | {
@@ -90,6 +100,7 @@ def main() -> int:
         dataset_rows=datasets,
         mesh_rows=mesh,
         expected_git_sha=target_sha,
+        require_effective_environment=hardened,
     ):
         errors.append("Stage 5A deployment invariants do not pass")
 
@@ -106,6 +117,19 @@ def main() -> int:
     if divergent:
         errors.append(f"dataset hashes diverge: {divergent}")
 
+    if hardened:
+        if sum(row["effective_environment_ok"] for row in nodes) != 7:
+            errors.append("effective systemd environment is not exact on all nodes")
+        if sum(row["systemd_dropin_count"] == 0 for row in nodes) != 7:
+            errors.append("systemd drop-ins remain on one or more nodes")
+        if sum(row.get("health_carbon_metric") == "lifecycle" for row in nodes) != 7:
+            errors.append("lifecycle carbon metric is not active on all nodes")
+        if sum(
+            row["state_root_writable"] and row["remote_state_root_writable"]
+            for row in nodes
+        ) != 7:
+            errors.append("state roots are not writable on all nodes")
+
     if errors:
         for error in errors:
             print(f"ERROR: {error}")
@@ -117,6 +141,11 @@ def main() -> int:
     print(f"nodes: {len(nodes)}/7")
     print(f"running_exact_sha: {sum(row['daemon_git_sha'] == target_sha for row in nodes)}/7")
     print(f"capabilities_ready: {sum(row['capabilities_ready'] for row in nodes)}/7")
+    if hardened:
+        print(f"effective_environment: {sum(row['effective_environment_ok'] for row in nodes)}/7")
+        print(f"zero_systemd_dropins: {sum(row['systemd_dropin_count'] == 0 for row in nodes)}/7")
+        print(f"lifecycle_carbon_metric: {sum(row.get('health_carbon_metric') == 'lifecycle' for row in nodes)}/7")
+        print(f"writable_state_roots: {sum(row['state_root_writable'] and row['remote_state_root_writable'] for row in nodes)}/7")
     print(f"directed_api_paths: {sum(row['api_ok'] for row in mesh)}/42")
     print(f"directed_ssh_paths: {sum(row['ssh_ok'] for row in mesh)}/42")
     print(f"dataset_manifest_rows: {len(datasets)}/49")
