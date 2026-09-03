@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
+from scripts.run_stage5d_seven_node_migration_ring import counter_artifacts
 from magellan.experiments.stage5d import (
     STAGE5D_RING,
     durable_checkpoint_continuity,
@@ -107,3 +111,40 @@ def test_stage5d_rejects_checkpoint_resume_mismatch() -> None:
         ownership_converged_final=True,
         expected_git_sha="a" * 40,
     )
+
+
+def test_counter_artifacts_renders_embedded_python_dict(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_run(args, **kwargs):
+        captured["script"] = args[-1]
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "state_root": "/tmp/state",
+                    "checkpoint_value": 380,
+                    "checkpoint_node_id": "boston",
+                    "checkpoint_updated_at_unix": 1.0,
+                    "progress_value": 380,
+                    "progress_node_id": "boston",
+                    "progress_updated_at_utc": "2026-09-03T00:00:00+00:00",
+                    "last_resumed_value": 380,
+                    "last_stopped_value": 380,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "scripts.run_stage5d_seven_node_migration_ring.subprocess.run",
+        fake_run,
+    )
+
+    result = counter_artifacts(
+        SimpleNamespace(id="boston", internal_ip="10.142.0.2"),
+        "run-test",
+        ssh_user="WILL",
+    )
+
+    assert result["checkpoint_value"] == 380
+    assert "print(json.dumps({" in captured["script"]
+    assert "print(json.dumps({{" not in captured["script"]

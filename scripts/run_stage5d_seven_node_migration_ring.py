@@ -302,7 +302,7 @@ log_text = log_path.read_text()
 resumed = [int(v) for v in re.findall(r"\\[counter\\] resumed value=(\\d+)", log_text)]
 stopped = [int(v) for v in re.findall(r"\\[counter\\] stopped value=(\\d+)", log_text)]
 
-print(json.dumps({
+print(json.dumps({{
     "state_root": root,
     "checkpoint_value": checkpoint.get("value"),
     "checkpoint_node_id": checkpoint.get("node_id"),
@@ -312,7 +312,7 @@ print(json.dumps({
     "progress_updated_at_utc": progress.get("updated_at_utc"),
     "last_resumed_value": resumed[-1] if resumed else None,
     "last_stopped_value": stopped[-1] if stopped else None,
-}))
+}}))
 PY_ARTIFACT
 """
 
