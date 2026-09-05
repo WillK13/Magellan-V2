@@ -54,3 +54,20 @@ runner samples:
 
 Stage 5E.3 subsequently introduces real-workload destination contention. Stage
 5E.4 enables autonomous scheduling and compares policies.
+
+## Short Dendro lifetime and live-process gate
+
+The canonical `dendro-r9-t1p0` calibration case is much shorter-lived than the
+DistilGPT-2 startup path. Stage 5E.2 therefore warms the eight benchmark/LLM
+processes first, then launches the three unchanged Dendro r9/t1 processes and
+starts the physical co-location profile as soon as all eleven process sessions
+are genuinely live. The default profile window is 10 seconds with 2-second
+sampling. This preserves the exact Stage 4D.1 workload class and reservation
+vector instead of extending Dendro's simulation horizon just to make the test
+pass.
+
+Registry `RUNNING` state alone is not accepted as liveness evidence. A workload
+must have at least one procfs process, a non-zombie leader state, and positive
+RSS at steady-state and throughout every physical profile sample. This matters
+because operator-only tasks are reconciled at scheduler epochs; a completed MPI
+launcher can otherwise remain represented as `RUNNING` until reconciliation.

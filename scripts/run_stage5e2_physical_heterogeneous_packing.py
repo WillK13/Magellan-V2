@@ -154,8 +154,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--comparison-id")
     parser.add_argument("--ssh-user", default=os.getenv("MAGELLAN_SSH_USER", "WILL"))
     parser.add_argument("--remote-repo", default="/home/WILL/Magellan-V2")
-    parser.add_argument("--profile-seconds", type=float, default=30.0)
-    parser.add_argument("--sample-interval-seconds", type=float, default=5.0)
+    parser.add_argument("--profile-seconds", type=float, default=10.0)
+    parser.add_argument("--sample-interval-seconds", type=float, default=2.0)
     parser.add_argument("--ready-timeout-seconds", type=float, default=1200.0)
     parser.add_argument("--request-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--stop-timeout-seconds", type=float, default=900.0)
@@ -350,6 +350,70 @@ def numeric(values: list[Any]) -> list[float]:
     return output
 
 
+def telemetry_record_is_live(telemetry: dict[str, Any]) -> bool:
+    """Require a genuinely live workload process, not only RUNNING registry state.
+
+    A completed MPI launcher can remain a zombie until the next scheduler epoch
+    reconciles runtime state.  Procfs reports that case as one process with state
+    ``Z`` and zero RSS.  Stage 5E.2 must never count that as physical co-location.
+    """
+    try:
+        process_count = int(telemetry.get("process_count") or 0)
+        rss_mb = float(telemetry.get("memory_rss_mb") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    process_state = str(telemetry.get("process_state") or "").strip().upper()
+    return process_count >= 1 and process_state not in {"Z", "X"} and rss_mb > 0.0
+
+
+def wait_live_packing(
+    *,
+    launched: list[dict[str, Any]],
+    timeout_seconds: float,
+) -> dict[str, float]:
+    """Wait until every task has a live non-zombie process and fresh RSS."""
+    deadline = time.monotonic() + timeout_seconds
+    last_not_ready: list[str] = []
+    while time.monotonic() < deadline:
+        not_ready: list[str] = []
+        progress: dict[str, float] = {}
+        for row in launched:
+            state = task_state(row["api"], row["task_id"])
+            if state is None:
+                not_ready.append(f"{row['task_id']}:missing")
+                continue
+            status = str(state.get("status"))
+            if status in {"failed", "completed", "stopped"}:
+                raise RuntimeError(
+                    f"{row['class_id']} task {row['task_id']} terminated before live profile: {state}"
+                )
+            try:
+                telemetry = request_json(
+                    f"{row['api']}/telemetry/tasks/{row['task_id']}", timeout=15.0
+                )
+            except Exception:
+                telemetry = {}
+            if status != "running" or not telemetry_record_is_live(telemetry):
+                not_ready.append(
+                    f"{row['node_id']}:{row['class_id']} status={status} "
+                    f"proc={telemetry.get('process_count')} "
+                    f"state={telemetry.get('process_state')} "
+                    f"rss={telemetry.get('memory_rss_mb')}"
+                )
+                continue
+            progress[row["task_id"]] = float(
+                state.get("progress_completed_units") or 0.0
+            )
+        if not not_ready and len(progress) == len(launched):
+            return progress
+        last_not_ready = not_ready
+        time.sleep(1.0)
+    raise TimeoutError(
+        "physical packing did not reach genuinely live process state; "
+        + "; ".join(last_not_ready[:12])
+    )
+
+
 def wait_steady(
     *,
     launched: list[dict[str, Any]],
@@ -386,11 +450,13 @@ def wait_steady(
             if (
                 status != "running"
                 or progress < minimum_progress[row["class_id"]]
-                or int(telemetry.get("process_count") or 0) < 1
+                or not telemetry_record_is_live(telemetry)
             ):
                 not_ready.append(
                     f"{row['node_id']}:{row['class_id']} status={status} "
-                    f"progress={progress} proc={telemetry.get('process_count')}"
+                    f"progress={progress} proc={telemetry.get('process_count')} "
+                    f"state={telemetry.get('process_state')} "
+                    f"rss={telemetry.get('memory_rss_mb')}"
                 )
                 continue
             initial_progress[row["task_id"]] = progress
@@ -470,6 +536,13 @@ def profile_physical_packing(
             if row["status"] != "running":
                 raise RuntimeError(
                     f"Task left RUNNING during physical profile: {row['task_id']} status={row['status']}"
+                )
+            if not telemetry_record_is_live(row):
+                raise RuntimeError(
+                    "Task has no genuinely live process during physical profile: "
+                    f"{row['task_id']} class={row['class_id']} "
+                    f"proc={row.get('process_count')} state={row.get('process_state')} "
+                    f"rss={row.get('memory_rss_mb')}"
                 )
 
         per_node_cpu: dict[str, float] = defaultdict(float)
@@ -804,26 +877,59 @@ def main() -> int:
             )
             return {**row, "task_id": str(view["run"]["run_id"])}
 
-        print("[launch] starting all 11 workload processes concurrently")
-        with ThreadPoolExecutor(max_workers=11) as pool:
-            futures = [pool.submit(launch_one, row) for row in prepared]
-            for future in as_completed(futures):
-                row = future.result()
-                launched.append(row)
-                print(
-                    f"  started {row['task_id']} {row['node_id']:16s} {row['class_id']}"
-                )
+        base_prepared = [
+            row for row in prepared if row["class_id"] != DENDRO_CLASS_ID
+        ]
+        dendro_prepared = [
+            row for row in prepared if row["class_id"] == DENDRO_CLASS_ID
+        ]
+
+        def launch_batch(rows: list[dict[str, Any]], label: str) -> None:
+            print(label)
+            with ThreadPoolExecutor(max_workers=len(rows)) as pool:
+                futures = [pool.submit(launch_one, row) for row in rows]
+                for future in as_completed(futures):
+                    launched_row = future.result()
+                    launched.append(launched_row)
+                    print(
+                        f"  started {launched_row['task_id']} "
+                        f"{launched_row['node_id']:16s} {launched_row['class_id']}"
+                    )
+
+        # Dendro r9/t1 is intentionally a short calibration workload.  Launch the
+        # slower-starting benchmark/LLM population first so model initialization
+        # cannot consume Dendro's useful lifetime before the physical profile.
+        launch_batch(
+            base_prepared,
+            "[launch-base] starting 8 benchmark/LLM workload processes concurrently",
+        )
+        base_launched = [
+            row for row in launched if row["class_id"] != DENDRO_CLASS_ID
+        ]
+        print("[steady-base] waiting for 8 benchmark/LLM workloads to make progress")
+        wait_steady(
+            launched=base_launched,
+            cluster=cluster,
+            timeout_seconds=args.ready_timeout_seconds,
+        )
+        print("[steady-base] 8/8 benchmark/LLM workloads ready")
+
+        launch_batch(
+            dendro_prepared,
+            "[launch-dendro] starting 3 exact dendro-r9-t1p0 workloads concurrently",
+        )
         launched.sort(key=lambda row: int(row["task_index"]))
         if len(launched) != 11:
             raise RuntimeError(f"Only {len(launched)}/11 tasks launched")
 
-        print("[steady] waiting for all 11 real workloads to run and make progress")
-        initial_progress = wait_steady(
+        print(
+            "[live] waiting for all 11 tasks to have genuinely live, non-zombie processes"
+        )
+        initial_progress = wait_live_packing(
             launched=launched,
-            cluster=cluster,
             timeout_seconds=args.ready_timeout_seconds,
         )
-        print("[steady] 11/11 simultaneously running with observed progress")
+        print("[live] 11/11 simultaneously live; starting physical profile immediately")
 
         # Check the actual Magellan ledger before collecting physical telemetry.
         for plan in plan_rows:

@@ -330,6 +330,8 @@ def stage5e2_passes(
             return False
         if int(float(row.get("rss_sample_count") or 0)) < 1:
             return False
+        if int(float(row.get("min_process_count") or 0)) < 1:
+            return False
         if float(row.get("max_memory_rss_mb") or 0) <= 0:
             return False
         if float(row.get("progress_min") or 0) < 0:

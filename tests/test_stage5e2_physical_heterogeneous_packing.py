@@ -5,6 +5,7 @@ from pathlib import Path
 
 from magellan.config.models import NodeResourceCapacity
 from magellan.models.types import TaskResourceRequest
+from scripts.run_stage5e2_physical_heterogeneous_packing import telemetry_record_is_live
 from magellan.experiments.stage5e2 import (
     BENCHMARK_CLASS_ID,
     DENDRO_CLASS_ID,
@@ -174,6 +175,7 @@ def _passing_rows() -> tuple[list[dict], list[dict]]:
                 "cpu_sample_count": 5,
                 "rss_sample_count": 6,
                 "max_memory_rss_mb": 100,
+                "min_process_count": 1,
                 "progress_min": 1,
                 "progress_max": 2,
                 "cleanup_ok": True,
@@ -206,4 +208,22 @@ def test_stage5e2_passes_only_complete_physical_evidence() -> None:
 def test_stage5e2_rejects_capacity_violation() -> None:
     tasks, nodes = _passing_rows()
     nodes[2]["capacity_respected"] = False
+    assert not stage5e2_passes(tasks, nodes)
+
+
+def test_live_telemetry_rejects_zombie_or_zero_rss() -> None:
+    live = {
+        "process_count": 3,
+        "process_state": "S",
+        "memory_rss_mb": 1400.0,
+    }
+    assert telemetry_record_is_live(live)
+    assert not telemetry_record_is_live({**live, "process_state": "Z"})
+    assert not telemetry_record_is_live({**live, "memory_rss_mb": 0.0})
+    assert not telemetry_record_is_live({**live, "process_count": 0})
+
+
+def test_stage5e2_rejects_zero_live_process_count() -> None:
+    tasks, nodes = _passing_rows()
+    tasks[6]["min_process_count"] = 0
     assert not stage5e2_passes(tasks, nodes)
