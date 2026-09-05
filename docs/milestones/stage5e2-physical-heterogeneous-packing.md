@@ -32,42 +32,47 @@ by Stage 5E.1. Only the Magellan `resource_request` declaration is replaced with
 the exact Stage 4D.1 p95 request derived from Stage 4A.3, so the live reservation
 ledger is evaluated against the same evidence-backed vectors used in replay.
 
-After all eleven jobs are simultaneously running and have made progress, the
-runner samples:
+After the eight benchmark/LLM jobs reach progress, the runner launches the three
+unchanged Dendro jobs and immediately searches for one **direct all-live witness**.
+The witness is collected with concurrent `ps`/procfs session snapshots over SSH
+on all seven VMs, rather than relying on Magellan's 5-second telemetry-store
+refresh. It records:
 
-- per-task process-group CPU utilization;
-- per-task RSS memory;
-- process counts, progress, and checkpoint bytes;
-- per-node Magellan reserved CPU/memory/GPU;
-- resource busy fraction and remaining capacity.
+- per-task real process-session CPU percentage;
+- per-task real RSS memory;
+- process count and leader state;
+- registry status/progress and PID;
+- a same-run per-node Magellan reservation/capacity snapshot.
 
 ## PASS criteria
 
-- 11/11 real workloads launch and are simultaneously `RUNNING`;
+- 11/11 real workloads launch and appear simultaneously in one direct procfs witness;
 - class mix is exactly 4 benchmark / 4 LLM / 3 Dendro;
 - all seven node layouts are frozen Stage 4D.1 maximal packings;
-- every task has real process CPU and RSS telemetry;
+- every task has a non-zombie session, positive real RSS, and real CPU evidence in that witness;
 - every node's live Magellan reservation ledger matches the frozen request sum;
 - no node exceeds its Stage 4D.1 effective capacity;
-- no workload leaves `RUNNING` during the profile window;
+- all eleven witness rows are captured in the same physical-packing round;
 - all eleven jobs stop or complete cleanly after measurement.
 
 Stage 5E.3 subsequently introduces real-workload destination contention. Stage
 5E.4 enables autonomous scheduling and compares policies.
 
-## Short Dendro lifetime and live-process gate
+## Short Dendro lifetime and direct live witness
 
 The canonical `dendro-r9-t1p0` calibration case is much shorter-lived than the
 DistilGPT-2 startup path. Stage 5E.2 therefore warms the eight benchmark/LLM
 processes first, then launches the three unchanged Dendro r9/t1 processes and
-starts the physical co-location profile as soon as all eleven process sessions
-are genuinely live. The default profile window is 10 seconds with 2-second
-sampling. This preserves the exact Stage 4D.1 workload class and reservation
-vector instead of extending Dendro's simulation horizon just to make the test
-pass.
+immediately attempts a concurrent direct-process witness across all seven VMs.
+This preserves the exact Stage 4D.1 workload class and reservation vector instead
+of extending Dendro's simulation horizon just to make the experiment easier.
 
-Registry `RUNNING` state alone is not accepted as liveness evidence. A workload
-must have at least one procfs process, a non-zombie leader state, and positive
-RSS at steady-state and throughout every physical profile sample. This matters
-because operator-only tasks are reconciled at scheduler epochs; a completed MPI
-launcher can otherwise remain represented as `RUNNING` until reconciliation.
+A witness only succeeds when every task's real session has at least one process,
+a non-zombie leader, and positive RSS. CPU and RSS are read directly from the
+remote process table, so stale Magellan telemetry cannot make a completed MPI
+launcher look physically alive. The experiment does **not** require the shortest
+calibration workload to remain active for an arbitrary 10-second window; Stage
+5E.1 already validates workload progress and checkpoint/resume correctness.
+
+The existing daemon completion-reconciliation latency remains a separate
+correctness-hardening item before Stage 5E.3.

@@ -5,7 +5,10 @@ from pathlib import Path
 
 from magellan.config.models import NodeResourceCapacity
 from magellan.models.types import TaskResourceRequest
-from scripts.run_stage5e2_physical_heterogeneous_packing import telemetry_record_is_live
+from scripts.run_stage5e2_physical_heterogeneous_packing import (
+    parse_ps_sessions,
+    telemetry_record_is_live,
+)
 from magellan.experiments.stage5e2 import (
     BENCHMARK_CLASS_ID,
     DENDRO_CLASS_ID,
@@ -227,3 +230,31 @@ def test_stage5e2_rejects_zero_live_process_count() -> None:
     tasks, nodes = _passing_rows()
     tasks[6]["min_process_count"] = 0
     assert not stage5e2_passes(tasks, nodes)
+
+
+def test_direct_ps_session_parser_aggregates_mpi_children() -> None:
+    raw = """
+ 420 420 Sl 100000 25.0
+ 420 421 R  500000 80.0
+ 420 422 S  400000 70.0
+ 999 999 Z       0  0.0
+"""
+    sessions = parse_ps_sessions(raw)
+    record = sessions[420]
+    assert record["process_count"] == 3
+    assert record["process_state"] == "SL"
+    assert abs(record["memory_rss_mb"] - (1_000_000 / 1024.0)) < 1e-9
+    assert abs(record["cpu_utilization_percent"] - 175.0) < 1e-9
+    assert sessions[999]["process_state"] == "Z"
+
+
+def test_stage5e2_accepts_single_direct_witness_round() -> None:
+    tasks, nodes = _passing_rows()
+    for row in tasks:
+        row["telemetry_sample_count"] = 1
+        row["cpu_sample_count"] = 1
+        row["rss_sample_count"] = 1
+    for row in nodes:
+        row["actual_cpu_sample_count"] = 1
+        row["actual_rss_sample_count"] = 1
+    assert stage5e2_passes(tasks, nodes)

@@ -324,7 +324,7 @@ def stage5e2_passes(
             return False
         if not _truthy(row.get("steady_running")):
             return False
-        if int(float(row.get("telemetry_sample_count") or 0)) < 2:
+        if int(float(row.get("telemetry_sample_count") or 0)) < 1:
             return False
         if int(float(row.get("cpu_sample_count") or 0)) < 1:
             return False

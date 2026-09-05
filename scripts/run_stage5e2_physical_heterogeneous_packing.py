@@ -139,6 +139,23 @@ NODE_SAMPLE_FIELDS = [
 ]
 
 
+LIVE_WITNESS_FIELDS = [
+    "sampled_at_utc",
+    "task_index",
+    "task_id",
+    "node_id",
+    "class_id",
+    "status",
+    "progress_completed_units",
+    "pid",
+    "process_count",
+    "process_state",
+    "cpu_utilization_percent",
+    "memory_rss_mb",
+    "live",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -156,6 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--remote-repo", default="/home/WILL/Magellan-V2")
     parser.add_argument("--profile-seconds", type=float, default=10.0)
     parser.add_argument("--sample-interval-seconds", type=float, default=2.0)
+    parser.add_argument("--witness-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--ready-timeout-seconds", type=float, default=1200.0)
     parser.add_argument("--request-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--stop-timeout-seconds", type=float, default=900.0)
@@ -286,6 +304,232 @@ def remote_check(node: Any, *, ssh_user: str, command: str, timeout: float = 60.
             f"asset/dependency preflight failed on {node.id}: "
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
+
+
+def remote_ps_snapshot(node: Any, *, ssh_user: str, timeout: float = 15.0) -> str:
+    result = subprocess.run(
+        [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=5",
+            f"{ssh_user}@{node.internal_ip}",
+            "ps -eo sid=,pid=,stat=,rss=,pcpu=",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"direct procfs witness failed on {node.id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return result.stdout
+
+
+def parse_ps_sessions(raw: str) -> dict[int, dict[str, Any]]:
+    sessions: dict[int, dict[str, Any]] = {}
+    for line in raw.splitlines():
+        fields = line.split()
+        if len(fields) != 5:
+            continue
+        try:
+            sid = int(fields[0])
+            pid = int(fields[1])
+            rss_kb = float(fields[3])
+            cpu_percent = float(fields[4])
+        except (TypeError, ValueError):
+            continue
+        state = fields[2].strip().upper()
+        record = sessions.setdefault(
+            sid,
+            {
+                "process_count": 0,
+                "process_state": None,
+                "memory_rss_mb": 0.0,
+                "cpu_utilization_percent": 0.0,
+            },
+        )
+        record["process_count"] += 1
+        record["memory_rss_mb"] += max(0.0, rss_kb) / 1024.0
+        record["cpu_utilization_percent"] += max(0.0, cpu_percent)
+        if pid == sid:
+            record["process_state"] = state
+    return sessions
+
+
+def capture_direct_live_witness(
+    *,
+    launched: list[dict[str, Any]],
+    cluster: Any,
+    ssh_user: str,
+) -> list[dict[str, Any]]:
+    node_by_id = {node.id: node for node in cluster.nodes}
+    state_by_task: dict[str, dict[str, Any] | None] = {}
+    with ThreadPoolExecutor(max_workers=len(launched)) as pool:
+        futures = {
+            pool.submit(task_state, row["api"], row["task_id"], 15.0): row["task_id"]
+            for row in launched
+        }
+        for future, task_id in futures.items():
+            state_by_task[task_id] = future.result()
+
+    node_ids = sorted({str(row["node_id"]) for row in launched})
+    ps_by_node: dict[str, dict[int, dict[str, Any]]] = {}
+    with ThreadPoolExecutor(max_workers=len(node_ids)) as pool:
+        futures = {
+            pool.submit(
+                remote_ps_snapshot,
+                node_by_id[node_id],
+                ssh_user=ssh_user,
+            ): node_id
+            for node_id in node_ids
+        }
+        for future, node_id in futures.items():
+            ps_by_node[node_id] = parse_ps_sessions(future.result())
+
+    sampled_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for row in launched:
+        state = state_by_task.get(str(row["task_id"])) or {}
+        pid = int(state.get("pid") or 0)
+        session = ps_by_node.get(str(row["node_id"]), {}).get(pid, {}) if pid else {}
+        process_count = int(session.get("process_count") or 0)
+        process_state = str(session.get("process_state") or "").upper()
+        rss_mb = float(session.get("memory_rss_mb") or 0.0)
+        live = (
+            str(state.get("status") or "") == "running"
+            and pid > 0
+            and process_count >= 1
+            and process_state[:1] not in {"Z", "X"}
+            and rss_mb > 0.0
+        )
+        rows.append(
+            {
+                "sampled_at_utc": sampled_at,
+                "task_index": row["task_index"],
+                "task_id": row["task_id"],
+                "node_id": row["node_id"],
+                "class_id": row["class_id"],
+                "status": state.get("status"),
+                "progress_completed_units": state.get("progress_completed_units"),
+                "pid": pid or None,
+                "process_count": process_count,
+                "process_state": process_state or None,
+                "cpu_utilization_percent": session.get("cpu_utilization_percent"),
+                "memory_rss_mb": rss_mb,
+                "live": live,
+            }
+        )
+    return rows
+
+
+def wait_direct_live_witness(
+    *,
+    launched: list[dict[str, Any]],
+    cluster: Any,
+    ssh_user: str,
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + timeout_seconds
+    last_rows: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        rows = capture_direct_live_witness(
+            launched=launched,
+            cluster=cluster,
+            ssh_user=ssh_user,
+        )
+        last_rows = rows
+        if len(rows) == len(launched) and all(bool(row.get("live")) for row in rows):
+            return rows
+        # The exact Dendro calibration run is brief; retry quickly while it is active.
+        time.sleep(0.25)
+    missing = [
+        f"{row.get('node_id')}:{row.get('class_id')} status={row.get('status')} "
+        f"pid={row.get('pid')} proc={row.get('process_count')} "
+        f"state={row.get('process_state')} rss={row.get('memory_rss_mb')}"
+        for row in last_rows
+        if not bool(row.get("live"))
+    ]
+    raise TimeoutError(
+        "11-task packing never produced one direct all-live procfs witness; "
+        + "; ".join(missing[:12])
+    )
+
+
+def witness_to_task_samples(witness_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for row in witness_rows:
+        samples.append(
+            {
+                "sample_index": 0,
+                "sampled_at_utc": row["sampled_at_utc"],
+                "task_index": row["task_index"],
+                "task_id": row["task_id"],
+                "node_id": row["node_id"],
+                "class_id": row["class_id"],
+                "status": row["status"],
+                "progress_completed_units": row["progress_completed_units"],
+                "pid": row["pid"],
+                "process_count": row["process_count"],
+                "process_state": row["process_state"],
+                "cpu_utilization_percent": row["cpu_utilization_percent"],
+                "memory_rss_mb": row["memory_rss_mb"],
+                "checkpoint_bytes": None,
+                "telemetry_last_sample_at_utc": row["sampled_at_utc"],
+                "telemetry_sample_count": 1,
+                "telemetry_freshness": "direct-ps-witness",
+                "telemetry_age_seconds": 0.0,
+            }
+        )
+    return samples
+
+
+def capture_node_witness_samples(
+    *,
+    cluster: Any,
+    witness_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    node_by_id = {node.id: node for node in cluster.nodes}
+    with ThreadPoolExecutor(max_workers=len(STAGE5E2_LAYOUT)) as pool:
+        futures = {
+            pool.submit(
+                request_json,
+                f"{base_url(node_by_id[node_id], cluster.api_port)}/health",
+                timeout=20.0,
+            ): node_id
+            for node_id in STAGE5E2_LAYOUT
+        }
+        health_by_node = {
+            node_id: future.result() for future, node_id in futures.items()
+        }
+    per_node_cpu: dict[str, float] = defaultdict(float)
+    per_node_rss: dict[str, float] = defaultdict(float)
+    for row in witness_rows:
+        per_node_cpu[str(row["node_id"])] += float(row.get("cpu_utilization_percent") or 0.0)
+        per_node_rss[str(row["node_id"])] += float(row.get("memory_rss_mb") or 0.0)
+    now = datetime.now(timezone.utc).isoformat()
+    samples: list[dict[str, Any]] = []
+    for node_id in STAGE5E2_LAYOUT:
+        health = health_by_node[node_id]
+        samples.append(
+            {
+                "sample_index": 0,
+                "sampled_at_utc": now,
+                "node_id": node_id,
+                "owned_task_count": health.get("owned_task_count"),
+                "reserved_cpu_cores": health.get("reserved_cpu_cores"),
+                "reserved_memory_mb": health.get("reserved_memory_mb"),
+                "reserved_gpu_count": health.get("reserved_gpu_count"),
+                "resource_busy_fraction": health.get("resource_busy_fraction"),
+                "available_cpu_cores": health.get("available_cpu_cores"),
+                "available_memory_mb": health.get("available_memory_mb"),
+                "actual_task_cpu_percent": per_node_cpu.get(node_id, 0.0),
+                "actual_task_rss_mb": per_node_rss.get(node_id, 0.0),
+            }
+        )
+    return samples
 
 
 def workload_asset_preflight(cluster: Any, args: argparse.Namespace) -> None:
@@ -743,6 +987,8 @@ def main() -> int:
     args = parse_args()
     if args.profile_seconds <= 0 or args.sample_interval_seconds <= 0:
         raise ValueError("profile/sample intervals must be positive")
+    if args.witness_timeout_seconds <= 0:
+        raise ValueError("witness timeout must be positive")
     if args.benchmark_iterations < 1:
         raise ValueError("benchmark iterations must be positive")
 
@@ -807,6 +1053,7 @@ def main() -> int:
     launched: list[dict[str, Any]] = []
     task_samples: list[dict[str, Any]] = []
     node_samples: list[dict[str, Any]] = []
+    witness_rows: list[dict[str, Any]] = []
     initial_progress: dict[str, float] = {}
     cleanup: dict[str, tuple[bool, str]] = {}
     error: str | None = None
@@ -923,20 +1170,32 @@ def main() -> int:
             raise RuntimeError(f"Only {len(launched)}/11 tasks launched")
 
         print(
-            "[live] waiting for all 11 tasks to have genuinely live, non-zombie processes"
+            "[witness] capturing one direct all-live process snapshot across all 7 VMs"
         )
-        initial_progress = wait_live_packing(
+        witness_rows = wait_direct_live_witness(
             launched=launched,
-            timeout_seconds=args.ready_timeout_seconds,
+            cluster=cluster,
+            ssh_user=args.ssh_user,
+            timeout_seconds=args.witness_timeout_seconds,
         )
-        print("[live] 11/11 simultaneously live; starting physical profile immediately")
+        initial_progress = {
+            str(row["task_id"]): float(row.get("progress_completed_units") or 0.0)
+            for row in witness_rows
+        }
+        task_samples = witness_to_task_samples(witness_rows)
+        node_samples = capture_node_witness_samples(
+            cluster=cluster,
+            witness_rows=witness_rows,
+        )
+        print(
+            "[witness] 11/11 genuinely live in one direct procfs witness; "
+            "recorded real CPU/RSS and reservation state"
+        )
 
-        # Check the actual Magellan ledger before collecting physical telemetry.
+        # Check the actual Magellan ledger in the witness round.
+        health_by_node = {str(row["node_id"]): row for row in node_samples}
         for plan in plan_rows:
-            health = request_json(
-                f"{base_url(node_by_id[str(plan['node_id'])], cluster.api_port)}/health",
-                timeout=20.0,
-            )
+            health = health_by_node[str(plan["node_id"])]
             expected_cpu = float(plan["expected_reserved_cpu_cores"])
             if abs(float(health.get("reserved_cpu_cores") or 0.0) - expected_cpu) > 1e-6:
                 raise RuntimeError(
@@ -945,16 +1204,6 @@ def main() -> int:
                 )
             if float(health.get("resource_busy_fraction") or 0.0) > 1.0 + 1e-9:
                 raise RuntimeError(f"{plan['node_id']} resource ledger oversubscribed")
-
-        print(
-            f"[profile] collecting {args.profile_seconds:.0f}s of concurrent task CPU/RSS telemetry"
-        )
-        task_samples, node_samples = profile_physical_packing(
-            launched=launched,
-            cluster=cluster,
-            profile_seconds=args.profile_seconds,
-            sample_interval_seconds=args.sample_interval_seconds,
-        )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         print(f"[ERROR] {error}")
@@ -1019,6 +1268,7 @@ def main() -> int:
         "steady_running_tasks": sum(bool(row["steady_running"]) for row in task_rows),
         "cleanup_ok_tasks": sum(bool(row["cleanup_ok"]) for row in task_rows),
         "profile_sample_rounds": len(sample_totals),
+        "direct_live_witness_tasks": sum(bool(row.get("live")) for row in witness_rows),
         "mean_cluster_task_cpu_percent": (
             statistics.fmean(sample_totals.values()) if sample_totals else None
         ),
@@ -1053,13 +1303,13 @@ def main() -> int:
                 "policy choice. Each node is assigned a frozen maximal packing."
             ),
             "telemetry": (
-                "Magellan /telemetry/tasks provides per-process-group CPU utilization, RSS, "
+                "A direct seven-node ps/procfs witness provides per-session CPU utilization and RSS; "
                 "process count, checkpoint bytes, and progress while /health provides the "
                 "declared reservation ledger. Samples are collected while all 11 tasks are "
                 "simultaneously RUNNING."
             ),
             "pass_criteria": (
-                "11/11 real tasks launch and remain running during the profile; every task "
+                "11/11 real tasks launch and are simultaneously live in one direct procfs witness; every task "
                 "has CPU and RSS samples; all seven node reservation ledgers exactly match "
                 "the frozen Stage 4D.1 packing and remain <= capacity; all tasks clean up."
             ),
@@ -1071,6 +1321,10 @@ def main() -> int:
     }
 
     write_csv(root / "planned_layout.csv", plan_rows, list(plan_rows[0].keys()))
+    if witness_rows:
+        write_csv(root / "live_witness.csv", witness_rows, LIVE_WITNESS_FIELDS)
+    else:
+        write_csv(root / "live_witness.csv", [], LIVE_WITNESS_FIELDS)
     if task_samples:
         write_csv(root / "task_profile_samples.csv", task_samples, TASK_SAMPLE_FIELDS)
     else:
