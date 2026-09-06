@@ -182,6 +182,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measurements-root", default="experiments/measurements")
     parser.add_argument("--comparison-id")
     parser.add_argument("--ssh-user", default=os.getenv("MAGELLAN_SSH_USER", "WILL"))
+    parser.add_argument(
+        "--local-node-id",
+        default=os.getenv("MAGELLAN_NODE_ID", "boston"),
+        help="Node hosting the experiment orchestrator; its disk probe is read locally.",
+    )
     parser.add_argument("--remote-repo", default="/home/WILL/Magellan-V2")
     parser.add_argument("--profile-seconds", type=float, default=10.0)
     parser.add_argument("--sample-interval-seconds", type=float, default=2.0)
@@ -368,8 +373,13 @@ def remote_available_bytes(
     *,
     ssh_user: str,
     path: str,
+    local_node_id: str,
     timeout: float = 20.0,
 ) -> int:
+    if node.id == local_node_id:
+        stats = os.statvfs(path)
+        return int(stats.f_bavail * stats.f_frsize)
+
     command = (
         "set -e; "
         f"df -PB1 --output=avail {shlex.quote(path)} | tail -n 1 | tr -d ' '"
@@ -407,6 +417,7 @@ def build_disk_preflight_rows(
     ssh_user: str,
     remote_repo: str,
     checkpoint_bytes_by_class: dict[str, int],
+    local_node_id: str,
     base_headroom_bytes: int,
     checkpoint_headroom_copies: float,
 ) -> list[dict[str, Any]]:
@@ -420,6 +431,7 @@ def build_disk_preflight_rows(
                 node_by_id[node_id],
                 ssh_user=ssh_user,
                 path=remote_repo,
+                local_node_id=local_node_id,
             ): node_id
             for node_id in STAGE5E2_LAYOUT
         }
@@ -1214,6 +1226,7 @@ def main() -> int:
             ssh_user=args.ssh_user,
             remote_repo=args.remote_repo,
             checkpoint_bytes_by_class=checkpoint_bytes_by_class,
+            local_node_id=args.local_node_id,
             base_headroom_bytes=int(args.disk_base_headroom_gib * 1024**3),
             checkpoint_headroom_copies=args.disk_checkpoint_copies,
         )

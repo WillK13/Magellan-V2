@@ -8,6 +8,7 @@ from magellan.models.types import TaskResourceRequest
 from scripts.run_stage5e2_physical_heterogeneous_packing import (
     parse_ps_sessions,
     planned_checkpoint_bytes_by_node,
+    remote_available_bytes,
     telemetry_record_is_live,
 )
 from magellan.experiments.stage5e2 import (
@@ -272,3 +273,24 @@ def test_stage5e2_disk_plan_reflects_two_llms_on_south_australia() -> None:
     assert planned["california"] == 254 + 986_586_794
     assert planned["nepal"] == 114_032_853
     assert planned["boston"] == 2 * 254
+
+
+def test_disk_probe_reads_orchestrator_node_locally(monkeypatch, tmp_path) -> None:
+    class Node:
+        id = "boston"
+        internal_ip = "10.142.0.2"
+
+    monkeypatch.setattr(
+        "scripts.run_stage5e2_physical_heterogeneous_packing.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ssh should not run")),
+    )
+    expected = tmp_path.stat().st_size  # force tmp_path to exist before statvfs
+    del expected
+    stats = __import__("os").statvfs(tmp_path)
+    result = remote_available_bytes(
+        Node(),
+        ssh_user="WILL",
+        path=str(tmp_path),
+        local_node_id="boston",
+    )
+    assert result == int(stats.f_bavail * stats.f_frsize)
