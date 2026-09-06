@@ -380,9 +380,13 @@ def remote_available_bytes(
         stats = os.statvfs(path)
         return int(stats.f_bavail * stats.f_frsize)
 
+    python_code = (
+        "import os,sys; "
+        "s=os.statvfs(sys.argv[1]); "
+        "print(int(s.f_bavail*s.f_frsize))"
+    )
     command = (
-        "set -e; "
-        f"df -PB1 --output=avail {shlex.quote(path)} | tail -n 1 | tr -d ' '"
+        f"python3 -c {shlex.quote(python_code)} {shlex.quote(path)}"
     )
     result = subprocess.run(
         [
@@ -402,12 +406,13 @@ def remote_available_bytes(
             f"disk preflight failed on {node.id}: "
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
+    raw = result.stdout.strip()
     try:
-        return int(result.stdout.strip())
+        return int(raw)
     except ValueError as exc:
         raise RuntimeError(
             f"disk preflight returned invalid free-space value on {node.id}: "
-            f"{result.stdout!r}"
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
         ) from exc
 
 

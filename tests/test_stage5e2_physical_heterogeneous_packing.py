@@ -294,3 +294,64 @@ def test_disk_probe_reads_orchestrator_node_locally(monkeypatch, tmp_path) -> No
         local_node_id="boston",
     )
     assert result == int(stats.f_bavail * stats.f_frsize)
+
+
+def test_disk_probe_reads_remote_node_with_python_statvfs(monkeypatch) -> None:
+    class Node:
+        id = "california"
+        internal_ip = "10.168.0.2"
+
+    captured = {}
+
+    class Result:
+        returncode = 0
+        stdout = "37580963840\n"
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return Result()
+
+    monkeypatch.setattr(
+        "scripts.run_stage5e2_physical_heterogeneous_packing.subprocess.run",
+        fake_run,
+    )
+    result = remote_available_bytes(
+        Node(),
+        ssh_user="WILL",
+        path="/home/WILL/Magellan-V2",
+        local_node_id="boston",
+    )
+    assert result == 37_580_963_840
+    assert captured["args"][-2] == "WILL@10.168.0.2"
+    remote_command = captured["args"][-1]
+    assert "python3 -c" in remote_command
+    assert "os.statvfs" in remote_command
+    assert "df -P" not in remote_command
+
+
+def test_disk_probe_reports_remote_stdout_and_stderr_on_bad_value(monkeypatch) -> None:
+    class Node:
+        id = "california"
+        internal_ip = "10.168.0.2"
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = "diagnostic text"
+
+    monkeypatch.setattr(
+        "scripts.run_stage5e2_physical_heterogeneous_packing.subprocess.run",
+        lambda *args, **kwargs: Result(),
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="stdout='' stderr='diagnostic text'"):
+        remote_available_bytes(
+            Node(),
+            ssh_user="WILL",
+            path="/home/WILL/Magellan-V2",
+            local_node_id="boston",
+        )
