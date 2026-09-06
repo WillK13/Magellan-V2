@@ -29,6 +29,7 @@ from magellan.runtime.accounting import RuntimeAccountingService
 from magellan.runtime.clock import MagellanClock
 from magellan.runtime.local_process import (
     LocalProcessRuntime,
+    RuntimeReconcileEvent,
 )
 from magellan.runtime.pause import PauseService
 from magellan.scheduler.scoring import evaluate_task
@@ -837,8 +838,70 @@ class SchedulerService:
                 flush=True,
             )
 
+    async def reconcile_runtime_once(
+        self,
+    ) -> list[RuntimeReconcileEvent]:
+        """Finalize exited local processes without running scheduling policy.
+
+        This path intentionally shares the per-task operation lock used by
+        pause, resume, migration, and explicit evaluation. Natural process
+        completion can therefore be detected frequently without racing a
+        state-changing scheduler/operator action.
+        """
+        task_ids = sorted(
+            set(
+                self._registry.running_owned_task_ids(
+                    self._local_node.id
+                )
+                + self._registry.paused_owned_task_ids(
+                    self._local_node.id
+                )
+            )
+        )
+        events: list[RuntimeReconcileEvent] = []
+        for task_id in task_ids:
+            async with self._task_operation_lock(task_id):
+                event = await asyncio.to_thread(
+                    self._runtime.reconcile_task,
+                    task_id,
+                )
+                if event is not None:
+                    events.append(event)
+
+        if events:
+            await self._broadcast_completed_states()
+
+        return events
+
+    async def run_runtime_reconciliation(
+        self,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Continuously reconcile process lifecycle, not scheduling policy."""
+        interval = self._policy.recovery.scan_interval_seconds
+        while not stop_event.is_set():
+            started = time.monotonic()
+            try:
+                await self.reconcile_runtime_once()
+            except Exception as exc:
+                print(
+                    f"[runtime-reconcile-warning] node="
+                    f"{self._local_node.id} "
+                    f"error={type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+            elapsed = time.monotonic() - started
+            delay = max(0.0, interval - elapsed)
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=delay,
+                )
+            except asyncio.TimeoutError:
+                pass
+
     async def run_epoch(self) -> None:
-        await asyncio.to_thread(self._runtime.reconcile)
         await self._broadcast_completed_states()
 
         task_ids = self._registry.running_owned_task_ids(

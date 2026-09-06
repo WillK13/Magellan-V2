@@ -474,102 +474,109 @@ class LocalProcessRuntime:
 
         return state
 
-    def reconcile(self) -> list[RuntimeReconcileEvent]:
-        events: list[RuntimeReconcileEvent] = []
+    def reconcile_task(
+        self,
+        task_id: str,
+    ) -> RuntimeReconcileEvent | None:
+        """Reconcile one local process without making a scheduling decision.
 
-        for state in self._registry.all_states():
-            if (
-                state.owner_node_id != self._local_node_id
-                or state.status not in {
-                    TaskStatus.RUNNING,
-                    TaskStatus.PAUSED,
-                }
-            ):
-                continue
+        The caller is responsible for serializing this lifecycle check with
+        pause/migrate/operator actions for the same task. This keeps natural
+        process completion independent of the much slower scheduler epoch.
+        """
+        state = self._registry.get_state(task_id)
+        if (
+            state.owner_node_id != self._local_node_id
+            or state.status not in {
+                TaskStatus.RUNNING,
+                TaskStatus.PAUSED,
+            }
+        ):
+            return None
 
-            process = self._processes.get(state.task_id)
-            exit_code = (
-                process.poll()
-                if process is not None
-                else None
-            )
+        process = self._processes.get(state.task_id)
+        exit_code = (
+            process.poll()
+            if process is not None
+            else None
+        )
 
-            alive = (
-                exit_code is None
-                and state.pid is not None
-                and pid_is_alive(state.pid)
-            )
+        alive = (
+            exit_code is None
+            and state.pid is not None
+            and pid_is_alive(state.pid)
+        )
 
-            if alive:
-                continue
+        if alive:
+            return None
 
-            self._processes.pop(state.task_id, None)
-            self._dendro_completion.synthesize(
-                state.task_id,
-                exit_code,
-            )
+        self._processes.pop(state.task_id, None)
+        self._dendro_completion.synthesize(
+            state.task_id,
+            exit_code,
+        )
 
-            if self._completion_manager.completion_marker_exists(
-                state.task_id
-            ):
-                try:
-                    manifest = self._completion_manager.finalize(
-                        task_id=state.task_id,
-                        exit_code=exit_code,
-                    )
-                except Exception as exc:
-                    error = (
-                        "Completion validation failed: "
-                        f"{exc}"
-                    )
-                    self._registry.mark_failed(
-                        state.task_id,
-                        error,
-                        exit_code=exit_code,
-                    )
-                    events.append(
-                        RuntimeReconcileEvent(
-                            task_id=state.task_id,
-                            status=TaskStatus.FAILED,
-                            exit_code=exit_code,
-                            error=error,
-                        )
-                    )
-                    continue
-
-                print(
-                    f"[runtime-complete] task={state.task_id} "
-                    f"files={len(manifest.files)} "
-                    f"bytes={manifest.total_size_bytes}",
-                    flush=True,
+        if self._completion_manager.completion_marker_exists(
+            state.task_id
+        ):
+            try:
+                manifest = self._completion_manager.finalize(
+                    task_id=state.task_id,
+                    exit_code=exit_code,
                 )
-
-                events.append(
-                    RuntimeReconcileEvent(
-                        task_id=state.task_id,
-                        status=TaskStatus.COMPLETED,
-                        exit_code=exit_code,
-                    )
+            except Exception as exc:
+                error = (
+                    "Completion validation failed: "
+                    f"{exc}"
                 )
-                continue
-
-            error = (
-                "Persisted process is no longer running "
-                "and no valid completion marker was written"
-            )
-            self._registry.mark_failed(
-                state.task_id,
-                error,
-                exit_code=exit_code,
-            )
-            events.append(
-                RuntimeReconcileEvent(
+                self._registry.mark_failed(
+                    state.task_id,
+                    error,
+                    exit_code=exit_code,
+                )
+                return RuntimeReconcileEvent(
                     task_id=state.task_id,
                     status=TaskStatus.FAILED,
                     exit_code=exit_code,
                     error=error,
                 )
+
+            print(
+                f"[runtime-complete] task={state.task_id} "
+                f"files={len(manifest.files)} "
+                f"bytes={manifest.total_size_bytes}",
+                flush=True,
             )
+
+            return RuntimeReconcileEvent(
+                task_id=state.task_id,
+                status=TaskStatus.COMPLETED,
+                exit_code=exit_code,
+            )
+
+        error = (
+            "Persisted process is no longer running "
+            "and no valid completion marker was written"
+        )
+        self._registry.mark_failed(
+            state.task_id,
+            error,
+            exit_code=exit_code,
+        )
+        return RuntimeReconcileEvent(
+            task_id=state.task_id,
+            status=TaskStatus.FAILED,
+            exit_code=exit_code,
+            error=error,
+        )
+
+    def reconcile(self) -> list[RuntimeReconcileEvent]:
+        events: list[RuntimeReconcileEvent] = []
+
+        for state in self._registry.all_states():
+            event = self.reconcile_task(state.task_id)
+            if event is not None:
+                events.append(event)
 
         return events
 

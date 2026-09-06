@@ -66,6 +66,12 @@ async def lifespan(_: FastAPI):
             name="magellan-scheduler",
         ),
         asyncio.create_task(
+            context.scheduler_service.run_runtime_reconciliation(
+                stop_event
+            ),
+            name="magellan-runtime-reconciliation",
+        ),
+        asyncio.create_task(
             context.recovery_service.run(stop_event),
             name="magellan-recovery",
         ),
@@ -128,7 +134,7 @@ async def reconcile_runtime() -> dict:
     measurement/operations workflows that need to finalize a process that has
     already exited without waiting for the next scheduling epoch.
     """
-    events = await asyncio.to_thread(context.runtime.reconcile)
+    events = await context.scheduler_service.reconcile_runtime_once()
     return {
         "node_id": context.local_node.id,
         "events": [
@@ -165,6 +171,9 @@ async def health() -> dict:
         "carbon_column": context.carbon_store.carbon_column,
         "capacity": context.local_node.capacity,
         "epoch_seconds": context.cluster.epoch_seconds,
+        "runtime_reconcile_seconds": (
+            context.policy.recovery.scan_interval_seconds
+        ),
         "auction_strategy": auction_status["strategy"],
         "available_task_slots": auction_status[
             "available_task_slots"
