@@ -41,8 +41,22 @@ def test_stage5a_deploy_owns_systemd_mode_and_prepares_state_root() -> None:
         target_sha="a" * 40,
         node_id="california",
         service="magellan",
+        policy="config/policy.prod.json",
     )
     assert "MAGELLAN_CLEAR_SYSTEMD_DROPINS=1" in command
     assert "MAGELLAN_PREPARE_STATE_ROOT=1" in command
     assert "MAGELLAN_INSTALL_CARBON_METRIC=lifecycle" in command
+    assert "MAGELLAN_INSTALL_POLICY=config/policy.prod.json" in command
     assert ".venv/bin/python -m compileall -q magellan scripts" in command
+
+
+def test_stage5a_deploy_propagates_custom_policy_to_systemd_installer() -> None:
+    command = deploy_remote_command(
+        remote_repo="/home/WILL/Magellan-V2",
+        branch="stage5e4-live-heterogeneous-comparison",
+        target_sha="b" * 40,
+        node_id="ethiopia",
+        service="magellan",
+        policy="config/policy.stage5e4.json",
+    )
+    assert "MAGELLAN_INSTALL_POLICY=config/policy.stage5e4.json" in command

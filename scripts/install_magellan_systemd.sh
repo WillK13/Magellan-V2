@@ -9,6 +9,7 @@ SSH_USER="${MAGELLAN_SSH_USER:-$RUN_USER}"
 CLEAR_DROPINS="${MAGELLAN_CLEAR_SYSTEMD_DROPINS:-0}"
 PREPARE_STATE_ROOT="${MAGELLAN_PREPARE_STATE_ROOT:-0}"
 INSTALL_CARBON_METRIC="${MAGELLAN_INSTALL_CARBON_METRIC:-}"
+INSTALL_POLICY="${MAGELLAN_INSTALL_POLICY:-config/policy.prod.json}"
 
 if [[ -z "$NODE_ID" ]]; then
   echo "usage: $0 <node-id>" >&2
@@ -27,6 +28,11 @@ UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TMP_FILE="$(mktemp)"
 trap 'rm -f "$TMP_FILE"' EXIT
 
+
+if [[ ! -f "$REPO_ROOT/$INSTALL_POLICY" ]]; then
+  echo "MAGELLAN_INSTALL_POLICY does not exist under repository: $INSTALL_POLICY" >&2
+  exit 4
+fi
 
 if [[ -n "$INSTALL_CARBON_METRIC" && "$INSTALL_CARBON_METRIC" != "direct" && "$INSTALL_CARBON_METRIC" != "lifecycle" ]]; then
   echo "MAGELLAN_INSTALL_CARBON_METRIC must be direct or lifecycle" >&2
@@ -87,7 +93,7 @@ Environment=MAGELLAN_NODE_ID=${NODE_ID}
 Environment=MAGELLAN_GIT_SHA=${GIT_SHA}
 Environment=MAGELLAN_GIT_BRANCH=${GIT_BRANCH}
 Environment=MAGELLAN_CONFIG=config/cluster.gcp.json
-Environment=MAGELLAN_POLICY=config/policy.prod.json
+Environment=MAGELLAN_POLICY=${INSTALL_POLICY}
 Environment=MAGELLAN_DATASETS=datasets
 ${CARBON_ENV_LINE}
 Environment=MAGELLAN_STATE_ROOT=${STATE_ROOT}

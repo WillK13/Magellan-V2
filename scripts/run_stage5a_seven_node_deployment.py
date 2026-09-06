@@ -114,6 +114,7 @@ def deploy_remote_command(
     target_sha: str,
     node_id: str,
     service: str,
+    policy: str,
 ) -> str:
     return f"""
 set -euo pipefail
@@ -132,17 +133,17 @@ fi
 git switch -C {shlex.quote(branch)} {shlex.quote('origin/' + branch)}
 test "$(git rev-parse HEAD)" = {shlex.quote(target_sha)}
 .venv/bin/python -m compileall -q magellan scripts
-MAGELLAN_CLEAR_SYSTEMD_DROPINS=1 MAGELLAN_PREPARE_STATE_ROOT=1 MAGELLAN_INSTALL_CARBON_METRIC=lifecycle scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
+MAGELLAN_CLEAR_SYSTEMD_DROPINS=1 MAGELLAN_PREPARE_STATE_ROOT=1 MAGELLAN_INSTALL_CARBON_METRIC=lifecycle MAGELLAN_INSTALL_POLICY={shlex.quote(policy)} scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
 sudo systemctl is-active --quiet {shlex.quote(service)}
 curl -fsS --retry 20 --retry-delay 1 --retry-connrefused http://127.0.0.1:8040/health >/dev/null
 echo STAGE5A_NODE_DEPLOYED node={shlex.quote(node_id)} sha=$(git rev-parse HEAD)
 """.strip()
 
 
-def local_restart_command(*, node_id: str, service: str) -> str:
+def local_restart_command(*, node_id: str, service: str, policy: str) -> str:
     return f"""
 set -euo pipefail
-MAGELLAN_CLEAR_SYSTEMD_DROPINS=1 MAGELLAN_PREPARE_STATE_ROOT=1 MAGELLAN_INSTALL_CARBON_METRIC=lifecycle scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
+MAGELLAN_CLEAR_SYSTEMD_DROPINS=1 MAGELLAN_PREPARE_STATE_ROOT=1 MAGELLAN_INSTALL_CARBON_METRIC=lifecycle MAGELLAN_INSTALL_POLICY={shlex.quote(policy)} scripts/install_magellan_systemd.sh {shlex.quote(node_id)} >/tmp/magellan-stage5a-systemd.log
 sudo systemctl is-active --quiet {shlex.quote(service)}
 curl -fsS --retry 20 --retry-delay 1 --retry-connrefused http://127.0.0.1:8040/health >/dev/null
 """.strip()
@@ -238,6 +239,7 @@ def main() -> int:
                     command=local_restart_command(
                         node_id=node.id,
                         service=args.service,
+                        policy=args.policy,
                     ),
                 )
             else:
@@ -253,6 +255,7 @@ def main() -> int:
                         target_sha=target_sha,
                         node_id=node.id,
                         service=args.service,
+                        policy=args.policy,
                     ),
                 )
             result = run(shell, check=False, timeout=180)
@@ -463,7 +466,7 @@ def main() -> int:
                 "The old active mode-specific root is left untouched."
             ),
             "input_identity": (
-                "Every node hashes cluster.gcp.json, policy.prod.json, and all seven "
+                "Every node hashes the selected cluster/policy configuration and all seven "
                 "carbon datasets. PASS requires identical hashes across nodes."
             ),
             "mesh": (
