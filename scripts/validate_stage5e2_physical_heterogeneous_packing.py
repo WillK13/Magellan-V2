@@ -81,6 +81,8 @@ def main() -> int:
     planned_rows = read_csv(root / "planned_layout.csv")
     task_samples = read_csv(root / "task_profile_samples.csv")
     node_samples = read_csv(root / "node_profile_samples.csv")
+    live_witness = read_csv(root / "live_witness.csv")
+    disk_rows = read_csv(root / "disk_preflight.csv")
 
     if not stage5e2_passes(task_rows, node_rows):
         print("ERROR: Stage 5E.2 task/node pass invariants failed")
@@ -132,11 +134,29 @@ def main() -> int:
     if int(summary.get("cleanup_ok_tasks") or 0) != 11:
         print("ERROR: not all 11 tasks cleaned up")
         return 2
-    if len(task_samples) < 22:
-        print("ERROR: fewer than two task telemetry samples per task")
+    if int(summary.get("direct_live_witness_tasks") or 0) != 11:
+        print("ERROR: direct live witness is not 11/11")
         return 2
-    if len(node_samples) < 14:
-        print("ERROR: fewer than two node resource samples per node")
+    if len(live_witness) != 11 or any(
+        str(row.get("live") or "").strip().lower() not in {"true", "1", "yes"}
+        for row in live_witness
+    ):
+        print("ERROR: live_witness.csv does not contain 11 live workloads")
+        return 2
+    if len(task_samples) < 11:
+        print("ERROR: missing direct task witness samples")
+        return 2
+    if len(node_samples) < 7:
+        print("ERROR: missing direct node reservation witness samples")
+        return 2
+    if int(summary.get("disk_preflight_pass_nodes") or 0) != 7:
+        print("ERROR: disk preflight did not pass on all seven nodes")
+        return 2
+    if len(disk_rows) != 7 or any(
+        str(row.get("sufficient") or "").strip().lower() not in {"true", "1", "yes"}
+        for row in disk_rows
+    ):
+        print("ERROR: disk_preflight.csv does not show 7/7 sufficient nodes")
         return 2
 
     print("STAGE_5E2_PHYSICAL_HETEROGENEOUS_PACKING_BUNDLE_PASS")
@@ -147,6 +167,8 @@ def main() -> int:
     print("nodes: 7/7 frozen maximal packings")
     print("reservation_matches: 7/7")
     print("capacity_respected: 7/7")
+    print("direct_live_witness: 11/11")
+    print("disk_preflight: 7/7")
     print(f"profile_sample_rounds: {summary.get('profile_sample_rounds')}")
     print(
         "planned_cpu_fraction: "

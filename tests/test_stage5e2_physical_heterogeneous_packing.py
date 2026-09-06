@@ -7,6 +7,7 @@ from magellan.config.models import NodeResourceCapacity
 from magellan.models.types import TaskResourceRequest
 from scripts.run_stage5e2_physical_heterogeneous_packing import (
     parse_ps_sessions,
+    planned_checkpoint_bytes_by_node,
     telemetry_record_is_live,
 )
 from magellan.experiments.stage5e2 import (
@@ -258,3 +259,16 @@ def test_stage5e2_accepts_single_direct_witness_round() -> None:
         row["actual_cpu_sample_count"] = 1
         row["actual_rss_sample_count"] = 1
     assert stage5e2_passes(tasks, nodes)
+
+
+def test_stage5e2_disk_plan_reflects_two_llms_on_south_australia() -> None:
+    checkpoint_bytes = {
+        BENCHMARK_CLASS_ID: 254,
+        LLM_CLASS_ID: 986_586_794,
+        DENDRO_CLASS_ID: 114_032_853,
+    }
+    planned = planned_checkpoint_bytes_by_node(checkpoint_bytes)
+    assert planned["south-australia"] == 2 * 986_586_794
+    assert planned["california"] == 254 + 986_586_794
+    assert planned["nepal"] == 114_032_853
+    assert planned["boston"] == 2 * 254

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -139,6 +140,17 @@ NODE_SAMPLE_FIELDS = [
 ]
 
 
+DISK_PREFLIGHT_FIELDS = [
+    "node_id",
+    "planned_checkpoint_bytes",
+    "checkpoint_headroom_copies",
+    "base_headroom_bytes",
+    "required_free_bytes",
+    "available_free_bytes",
+    "sufficient",
+]
+
+
 LIVE_WITNESS_FIELDS = [
     "sampled_at_utc",
     "task_index",
@@ -174,6 +186,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-seconds", type=float, default=10.0)
     parser.add_argument("--sample-interval-seconds", type=float, default=2.0)
     parser.add_argument("--witness-timeout-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--disk-base-headroom-gib",
+        type=float,
+        default=1.0,
+        help="Free-space reserve required on every node in addition to checkpoint headroom.",
+    )
+    parser.add_argument(
+        "--disk-checkpoint-copies",
+        type=float,
+        default=2.0,
+        help=(
+            "Free-space multiplier applied to the sum of planned Stage 5E.1 checkpoint "
+            "sizes on each node. Two copies protects overlapping checkpoint rewrites."
+        ),
+    )
     parser.add_argument("--ready-timeout-seconds", type=float, default=1200.0)
     parser.add_argument("--request-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--stop-timeout-seconds", type=float, default=900.0)
@@ -304,6 +331,120 @@ def remote_check(node: Any, *, ssh_user: str, command: str, timeout: float = 60.
             f"asset/dependency preflight failed on {node.id}: "
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
+
+
+def read_stage5e1_checkpoint_bytes(stage5e1_path: Path) -> dict[str, int]:
+    cases_path = stage5e1_path / "cases.csv"
+    if not cases_path.is_file():
+        raise FileNotFoundError(cases_path)
+    values: dict[str, int] = {}
+    with cases_path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            class_id = str(row.get("class_id") or "")
+            raw = row.get("checkpoint_bytes")
+            if not class_id or raw in (None, ""):
+                continue
+            values[class_id] = max(values.get(class_id, 0), int(float(raw)))
+    missing = set(EXPECTED_CLASS_COUNTS) - set(values)
+    if missing:
+        raise RuntimeError(
+            "Stage 5E.1 checkpoint evidence is missing classes: "
+            + ", ".join(sorted(missing))
+        )
+    return values
+
+
+def planned_checkpoint_bytes_by_node(
+    checkpoint_bytes_by_class: dict[str, int],
+) -> dict[str, int]:
+    return {
+        node_id: sum(int(checkpoint_bytes_by_class[class_id]) for class_id in classes)
+        for node_id, classes in STAGE5E2_LAYOUT.items()
+    }
+
+
+def remote_available_bytes(
+    node: Any,
+    *,
+    ssh_user: str,
+    path: str,
+    timeout: float = 20.0,
+) -> int:
+    command = (
+        "set -e; "
+        f"df -PB1 --output=avail {shlex.quote(path)} | tail -n 1 | tr -d ' '"
+    )
+    result = subprocess.run(
+        [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=5",
+            f"{ssh_user}@{node.internal_ip}",
+            command,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"disk preflight failed on {node.id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    try:
+        return int(result.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"disk preflight returned invalid free-space value on {node.id}: "
+            f"{result.stdout!r}"
+        ) from exc
+
+
+def build_disk_preflight_rows(
+    *,
+    cluster: Any,
+    ssh_user: str,
+    remote_repo: str,
+    checkpoint_bytes_by_class: dict[str, int],
+    base_headroom_bytes: int,
+    checkpoint_headroom_copies: float,
+) -> list[dict[str, Any]]:
+    node_by_id = {node.id: node for node in cluster.nodes}
+    planned = planned_checkpoint_bytes_by_node(checkpoint_bytes_by_class)
+    available: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=len(STAGE5E2_LAYOUT)) as pool:
+        futures = {
+            pool.submit(
+                remote_available_bytes,
+                node_by_id[node_id],
+                ssh_user=ssh_user,
+                path=remote_repo,
+            ): node_id
+            for node_id in STAGE5E2_LAYOUT
+        }
+        for future, node_id in futures.items():
+            available[node_id] = future.result()
+
+    rows: list[dict[str, Any]] = []
+    for node_id in STAGE5E2_LAYOUT:
+        planned_bytes = int(planned[node_id])
+        required = int(
+            math.ceil(base_headroom_bytes + checkpoint_headroom_copies * planned_bytes)
+        )
+        free = int(available[node_id])
+        rows.append(
+            {
+                "node_id": node_id,
+                "planned_checkpoint_bytes": planned_bytes,
+                "checkpoint_headroom_copies": checkpoint_headroom_copies,
+                "base_headroom_bytes": base_headroom_bytes,
+                "required_free_bytes": required,
+                "available_free_bytes": free,
+                "sufficient": free >= required,
+            }
+        )
+    return rows
 
 
 def remote_ps_snapshot(node: Any, *, ssh_user: str, timeout: float = 15.0) -> str:
@@ -989,6 +1130,10 @@ def main() -> int:
         raise ValueError("profile/sample intervals must be positive")
     if args.witness_timeout_seconds <= 0:
         raise ValueError("witness timeout must be positive")
+    if args.disk_base_headroom_gib < 0:
+        raise ValueError("disk base headroom must be non-negative")
+    if args.disk_checkpoint_copies <= 0:
+        raise ValueError("disk checkpoint copies must be positive")
     if args.benchmark_iterations < 1:
         raise ValueError("benchmark iterations must be positive")
 
@@ -1056,11 +1201,40 @@ def main() -> int:
     witness_rows: list[dict[str, Any]] = []
     initial_progress: dict[str, float] = {}
     cleanup: dict[str, tuple[bool, str]] = {}
+    disk_rows: list[dict[str, Any]] = []
     error: str | None = None
 
     try:
         hardened_preflight(cluster, target_sha)
         workload_asset_preflight(cluster, args)
+
+        checkpoint_bytes_by_class = read_stage5e1_checkpoint_bytes(stage5e1_path)
+        disk_rows = build_disk_preflight_rows(
+            cluster=cluster,
+            ssh_user=args.ssh_user,
+            remote_repo=args.remote_repo,
+            checkpoint_bytes_by_class=checkpoint_bytes_by_class,
+            base_headroom_bytes=int(args.disk_base_headroom_gib * 1024**3),
+            checkpoint_headroom_copies=args.disk_checkpoint_copies,
+        )
+        print("[disk] validating checkpoint free-space headroom")
+        for row in disk_rows:
+            print(
+                f"  {row['node_id']:16s} free={row['available_free_bytes'] / 1024**3:.2f}GiB "
+                f"required={row['required_free_bytes'] / 1024**3:.2f}GiB "
+                f"planned_ckpt={row['planned_checkpoint_bytes'] / 1024**3:.2f}GiB "
+                f"ok={row['sufficient']}"
+            )
+        insufficient = [row for row in disk_rows if not bool(row["sufficient"])]
+        if insufficient:
+            detail = "; ".join(
+                f"{row['node_id']} free={row['available_free_bytes'] / 1024**3:.2f}GiB "
+                f"required={row['required_free_bytes'] / 1024**3:.2f}GiB"
+                for row in insufficient
+            )
+            raise RuntimeError(
+                "Insufficient disk headroom for concurrent workload checkpoints: " + detail
+            )
 
         dendro_template = json.loads(Path(args.dendro_definition).read_text(encoding="utf-8"))
         node_ids = [node.id for node in cluster.nodes]
@@ -1269,6 +1443,10 @@ def main() -> int:
         "cleanup_ok_tasks": sum(bool(row["cleanup_ok"]) for row in task_rows),
         "profile_sample_rounds": len(sample_totals),
         "direct_live_witness_tasks": sum(bool(row.get("live")) for row in witness_rows),
+        "disk_preflight_nodes": len(disk_rows),
+        "disk_preflight_pass_nodes": sum(bool(row.get("sufficient")) for row in disk_rows),
+        "disk_base_headroom_gib": args.disk_base_headroom_gib,
+        "disk_checkpoint_copies": args.disk_checkpoint_copies,
         "mean_cluster_task_cpu_percent": (
             statistics.fmean(sample_totals.values()) if sample_totals else None
         ),
@@ -1302,6 +1480,12 @@ def main() -> int:
                 "Stage 5E.2 tests physical co-location and the resource model, not carbon "
                 "policy choice. Each node is assigned a frozen maximal packing."
             ),
+            "disk_preflight": (
+                "Before task registration, every node must have one GiB of base free-space "
+                "headroom plus two times the sum of the Stage 5E.1 checkpoint sizes planned "
+                "for that node. This protects concurrent checkpoint rewrites and rejects "
+                "disk-pressure failures before launching workloads."
+            ),
             "telemetry": (
                 "A direct seven-node ps/procfs witness provides per-session CPU utilization and RSS; "
                 "process count, checkpoint bytes, and progress while /health provides the "
@@ -1321,6 +1505,7 @@ def main() -> int:
     }
 
     write_csv(root / "planned_layout.csv", plan_rows, list(plan_rows[0].keys()))
+    write_csv(root / "disk_preflight.csv", disk_rows, DISK_PREFLIGHT_FIELDS)
     if witness_rows:
         write_csv(root / "live_witness.csv", witness_rows, LIVE_WITNESS_FIELDS)
     else:
@@ -1366,6 +1551,10 @@ def main() -> int:
             f"observed_task_cpu: mean={summary['mean_cluster_task_cpu_percent']:.1f}% "
             f"max={summary['max_cluster_task_cpu_percent']:.1f}% across cluster"
         )
+    print(
+        f"disk_preflight: {summary['disk_preflight_pass_nodes']}/7 "
+        "nodes with checkpoint headroom"
+    )
     print(f"cleanup: {summary['cleanup_ok_tasks']}/11")
     if error:
         print(f"error: {error}")
