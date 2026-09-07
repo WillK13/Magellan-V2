@@ -284,16 +284,21 @@ def test_disk_probe_reads_orchestrator_node_locally(monkeypatch, tmp_path) -> No
         "scripts.run_stage5e2_physical_heterogeneous_packing.subprocess.run",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ssh should not run")),
     )
-    expected = tmp_path.stat().st_size  # force tmp_path to exist before statvfs
-    del expected
-    stats = __import__("os").statvfs(tmp_path)
+    class FixedStatvfs:
+        f_bavail = 239_161_522
+        f_frsize = 4096
+
+    monkeypatch.setattr(
+        "scripts.run_stage5e2_physical_heterogeneous_packing.os.statvfs",
+        lambda path: FixedStatvfs(),
+    )
     result = remote_available_bytes(
         Node(),
         ssh_user="WILL",
         path=str(tmp_path),
         local_node_id="boston",
     )
-    assert result == int(stats.f_bavail * stats.f_frsize)
+    assert result == int(FixedStatvfs.f_bavail * FixedStatvfs.f_frsize)
 
 
 def test_disk_probe_reads_remote_node_with_python_statvfs(monkeypatch) -> None:
