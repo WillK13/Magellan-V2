@@ -141,6 +141,8 @@ def main() -> int:
         errors.append("Magellan trial did not exercise a successful migration")
     if int(magellan.get("failed_migration_count") or 0) != 0:
         errors.append("Magellan trial contains failed migrations")
+    if float(magellan.get("evaluation_trigger_delay_seconds_after_witness") or 0.0) > 2.0:
+        errors.append("Magellan evaluation triggers were not issued promptly after the 9/9 physical witness")
 
     for policy in POLICIES:
         trial_root = root / policy

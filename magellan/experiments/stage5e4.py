@@ -113,6 +113,11 @@ def trial_passes(
             return False
         if migrations < 1:
             return False
+        # The exact Dendro r9/t1p0 jobs are intentionally short.  They must be
+        # physically present at the scheduling epoch, so the six evaluation
+        # triggers are submitted immediately after the 9/9 direct witness.
+        if float(trial.get("evaluation_trigger_delay_seconds_after_witness") or 0.0) > 2.0:
+            return False
     return True
 
 

@@ -42,6 +42,7 @@ def _trial(policy: str) -> dict:
         "trace_anchor_utc": "2024-01-05T00:02:00+00:00",
         "trace_date_utc": "2024-01-05",
         "pre_live_witness_count": 9,
+        "evaluation_trigger_delay_seconds_after_witness": 0.0 if policy == STATIC_POLICY else 0.2,
         "scheduler_decision_count": 0 if policy == STATIC_POLICY else 6,
         "bid_count": 0 if policy == STATIC_POLICY else 4,
         "accepted_or_consumed_bid_count": 0 if policy == STATIC_POLICY else 1,
@@ -107,6 +108,12 @@ def test_magellan_trial_requires_real_movement() -> None:
     trial["successful_migration_count"] = 0
     assert not trial_passes(trial, expected_layout_fingerprint=layout_fingerprint(_layout()))
 
+
+
+def test_magellan_trial_rejects_late_evaluation_after_physical_witness() -> None:
+    trial = _trial(MAGELLAN_POLICY)
+    trial["evaluation_trigger_delay_seconds_after_witness"] = 2.5
+    assert not trial_passes(trial, expected_layout_fingerprint=layout_fingerprint(_layout()))
 
 def test_stage5e4_comparison_passes_without_requiring_carbon_win() -> None:
     static = _trial(STATIC_POLICY)

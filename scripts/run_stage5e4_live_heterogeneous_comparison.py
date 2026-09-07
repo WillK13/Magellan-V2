@@ -521,18 +521,44 @@ def capture_live_witness(
     phase: str,
     policy: str,
 ) -> list[dict[str, Any]]:
+    """Capture one near-simultaneous direct process/accounting witness.
+
+    The exact Dendro r9/t1p0 calibration job is intentionally short.  Stage 5E.2
+    already established that it can be witnessed reliably when registry-state and
+    process-table reads are issued concurrently.  Do the same here: serial reads
+    across nine tasks plus seven nodes can consume the workload's entire lifetime
+    and create a false negative before the comparison even starts.
+    """
     node_by_id = {node.id: node for node in cluster.nodes}
-    state_by_task = {row["task_id"]: task_state(row["api"], row["task_id"]) or {} for row in rows}
-    ps_by_node = {
-        node_id: parse_ps_sessions(ps_snapshot(node_by_id[node_id], ssh_user=ssh_user, local_node_id=local_node_id))
-        for node_id in sorted({row["node_id"] for row in rows})
-    }
+    node_ids = sorted({str(row["node_id"]) for row in rows})
+    state_by_task: dict[str, dict[str, Any]] = {}
+    ps_by_node: dict[str, dict[int, dict[str, Any]]] = {}
+
+    with ThreadPoolExecutor(max_workers=max(1, len(rows) + len(node_ids))) as pool:
+        state_futures = {
+            pool.submit(task_state, row["api"], row["task_id"], 15.0): str(row["task_id"])
+            for row in rows
+        }
+        ps_futures = {
+            pool.submit(
+                ps_snapshot,
+                node_by_id[node_id],
+                ssh_user=ssh_user,
+                local_node_id=local_node_id,
+            ): node_id
+            for node_id in node_ids
+        }
+        for future, task_id in state_futures.items():
+            state_by_task[task_id] = future.result() or {}
+        for future, node_id in ps_futures.items():
+            ps_by_node[node_id] = parse_ps_sessions(future.result())
+
     sampled = datetime.now(timezone.utc).isoformat()
     output: list[dict[str, Any]] = []
     for row in rows:
-        state = state_by_task[row["task_id"]]
+        state = state_by_task[str(row["task_id"])]
         pid = int(state.get("pid") or 0)
-        session = ps_by_node.get(row["node_id"], {}).get(pid, {}) if pid else {}
+        session = ps_by_node.get(str(row["node_id"]), {}).get(pid, {}) if pid else {}
         proc_state = str(session.get("process_state") or "").upper()
         rss = float(session.get("memory_rss_mb") or 0.0)
         live = (
@@ -556,6 +582,14 @@ def capture_live_witness(
                 "process_state": proc_state or None,
                 "cpu_utilization_percent": session.get("cpu_utilization_percent"),
                 "memory_rss_mb": rss,
+                "accumulated_runtime_seconds": float(state.get("accumulated_runtime_seconds") or 0.0),
+                "accumulated_migration_seconds": float(state.get("accumulated_migration_seconds") or 0.0),
+                "accumulated_carbon_grams": float(state.get("accumulated_carbon_grams") or 0.0),
+                "accumulated_compute_carbon_grams": float(state.get("accumulated_compute_carbon_grams") or 0.0),
+                "accumulated_transfer_carbon_grams": float(state.get("accumulated_transfer_carbon_grams") or 0.0),
+                "accumulated_cost_usd": float(state.get("accumulated_cost_usd") or 0.0),
+                "accumulated_compute_cost_usd": float(state.get("accumulated_compute_cost_usd") or 0.0),
+                "accumulated_transfer_cost_usd": float(state.get("accumulated_transfer_cost_usd") or 0.0),
                 "live": live,
             }
         )
@@ -854,39 +888,48 @@ def run_trial(
         print("[steady-base] waiting for all 6 benchmark/LLM tasks to be genuinely live with progress")
         wait_base_ready(launched, args.ready_timeout_seconds)
 
+        # Prepare the controlled trace instant before launching the brief Dendro
+        # jobs.  After the all-live witness there must be no serial state-snapshot
+        # phase before Magellan's evaluation requests are issued.
+        anchor = trace_anchor(cluster)
+
         print("[launch-dendro] starting 3 exact dendro-r9-t1p0 workloads concurrently")
         with ThreadPoolExecutor(max_workers=len(dendro_prepared)) as pool:
             for future in as_completed([pool.submit(launch, row) for row in dendro_prepared]):
                 value = future.result()
                 launched.append(value)
                 print(f"  started {value['task_id']} {value['initial_node_id']:16s} {value['class_id']}")
-        wait_runs(cluster, [row["task_id"] for row in launched], args.convergence_timeout_seconds)
+
+        # Do not wait for seven-node registry convergence here: the exact Dendro
+        # calibration workload is shorter than that distributed bookkeeping path.
+        # The direct witness is the physical epoch boundary; ownership convergence
+        # is checked normally at the end of the trial.
         witness = wait_all_live(launched, cluster=cluster, args=args, policy=policy)
+        witness_completed_monotonic = time.monotonic()
         print(f"[witness] {sum(bool(row['live']) for row in witness)}/{EXPECTED_TASK_COUNT} real tasks simultaneously live")
 
         initial_progress = {
             row["task_id"]: row.get("progress_completed_units") for row in witness
         }
-        # Snapshot authoritative accounting exactly at the beginning of the fixed
-        # measurement window. Trial totals below are deltas from this baseline, so
-        # workload launch/model-loading/checkpoint warm-up is not charged to either
-        # policy comparison.
-        baseline_accounting: dict[str, dict[str, float]] = {}
-        for row in launched:
-            state = task_state(row["api"], row["task_id"], timeout=20.0)
-            if not state:
-                raise RuntimeError(f"missing baseline state for {row['task_id']}")
-            baseline_accounting[row["task_id"]] = {
-                "runtime_seconds": float(state.get("accumulated_runtime_seconds") or 0.0),
-                "migration_seconds": float(state.get("accumulated_migration_seconds") or 0.0),
-                "carbon_grams": float(state.get("accumulated_carbon_grams") or 0.0),
-                "compute_carbon_grams": float(state.get("accumulated_compute_carbon_grams") or 0.0),
-                "transfer_carbon_grams": float(state.get("accumulated_transfer_carbon_grams") or 0.0),
-                "cost_usd": float(state.get("accumulated_cost_usd") or 0.0),
-                "compute_cost_usd": float(state.get("accumulated_compute_cost_usd") or 0.0),
-                "transfer_cost_usd": float(state.get("accumulated_transfer_cost_usd") or 0.0),
+        # The direct witness already contains the authoritative state snapshot. Use
+        # those exact values as the fixed-window accounting baseline instead of
+        # issuing nine more serial API reads that could outlive Dendro r9/t1p0.
+        baseline_accounting = {
+            str(row["task_id"]): {
+                "runtime_seconds": float(row.get("accumulated_runtime_seconds") or 0.0),
+                "migration_seconds": float(row.get("accumulated_migration_seconds") or 0.0),
+                "carbon_grams": float(row.get("accumulated_carbon_grams") or 0.0),
+                "compute_carbon_grams": float(row.get("accumulated_compute_carbon_grams") or 0.0),
+                "transfer_carbon_grams": float(row.get("accumulated_transfer_carbon_grams") or 0.0),
+                "cost_usd": float(row.get("accumulated_cost_usd") or 0.0),
+                "compute_cost_usd": float(row.get("accumulated_compute_cost_usd") or 0.0),
+                "transfer_cost_usd": float(row.get("accumulated_transfer_cost_usd") or 0.0),
             }
-        anchor = trace_anchor(cluster)
+            for row in witness
+        }
+        if len(baseline_accounting) != EXPECTED_TASK_COUNT:
+            raise RuntimeError("direct witness did not provide accounting baselines for all nine tasks")
+
         print(f"[trial] trace_anchor={anchor} duration={args.trial_seconds:.0f}s")
         start_monotonic = time.monotonic()
         run_ids = {row["task_id"] for row in launched}
@@ -894,11 +937,12 @@ def run_trial(
         evaluation_pool: ThreadPoolExecutor | None = None
         evaluation_futures: dict[Future[Any], dict[str, Any]] = {}
         evaluation_results: list[dict[str, Any]] = []
+        evaluation_trigger_delay_seconds = 0.0
         if policy == MAGELLAN_POLICY:
             cohort = [row for row in launched if row["class_id"] in DECISION_CLASSES]
             print(
                 f"[evaluate] triggering {len(cohort)} benchmark/LLM production evaluations "
-                "at one synchronized trace instant"
+                "immediately after the 9/9 physical witness"
             )
             evaluation_pool = ThreadPoolExecutor(max_workers=len(cohort))
             for row in cohort:
@@ -910,6 +954,11 @@ def run_trial(
                     timeout=args.request_timeout_seconds,
                 )
                 evaluation_futures[future] = row
+            evaluation_trigger_delay_seconds = time.monotonic() - witness_completed_monotonic
+            print(
+                f"[evaluate] trigger_submission_delay_after_witness="
+                f"{evaluation_trigger_delay_seconds:.3f}s"
+            )
 
         samples: list[dict[str, Any]] = []
         sample_index = 0
@@ -1064,6 +1113,7 @@ def run_trial(
             "trace_anchor_utc": anchor,
             "trace_date_utc": anchor[:10],
             "pre_live_witness_count": sum(bool(row["live"]) for row in witness),
+            "evaluation_trigger_delay_seconds_after_witness": evaluation_trigger_delay_seconds,
             "scheduler_decision_count": len(decisions),
             "bid_count": len(bids),
             "accepted_or_consumed_bid_count": sum(str(row.get("status")) in {"accepted", "consumed"} for row in bids),

@@ -50,7 +50,13 @@ comparison.
 Before each trial begins, Stage 5E.4 requires one direct process-session witness
 showing all nine actual workloads simultaneously alive. LLM startup is completed
 before the short Dendro jobs are launched so model initialization cannot consume
-Dendro's useful lifetime before the witness.
+Dendro's useful lifetime before the witness. Registry-state reads and per-node
+process-table snapshots are issued concurrently (the same direct-witness method
+validated in Stage 5E.2), so the witness itself cannot serially consume the short
+Dendro run. For the Magellan policy, the six benchmark/LLM evaluation requests are
+submitted immediately after that 9/9 witness (required within two seconds), which
+proves the exact Dendro jobs were real physical background load at the scheduling
+epoch. They may complete normally later in the fixed trial window.
 
 During the fixed trial window, the harness samples all seven daemons for:
 
@@ -71,7 +77,8 @@ The experiment passes when:
 - both trials use the exact same frozen nine-task layout and 3/3/3 class mix;
 - both obtain a 9/9 direct pre-trial live-process witness;
 - the static trial produces zero scheduler decisions, bids, or migrations;
-- the Magellan trial produces exactly six controlled benchmark/LLM scheduler
+- the Magellan trial submits its six benchmark/LLM evaluations within two
+  seconds of the 9/9 physical witness, then produces exactly six scheduler
   decisions, at least one bid, and at least one successful real migration;
 - no migration fails;
 - no sampled node exceeds configured resource capacity;
