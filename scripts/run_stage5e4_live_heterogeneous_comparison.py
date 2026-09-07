@@ -43,6 +43,8 @@ from magellan.experiments.stage5e4 import (
     EXPECTED_SOURCE_SCENARIO_ID,
     EXPECTED_TASK_COUNT,
     MAGELLAN_POLICY,
+    MIN_NODE_SAMPLE_COVERAGE_FRACTION,
+    MIN_SAMPLE_COVERAGE_FRACTION,
     POLICIES,
     STATIC_POLICY,
     layout_fingerprint,
@@ -627,6 +629,20 @@ def trace_anchor(cluster: Any) -> str:
     return str(forecast["generated_at_utc"])
 
 
+SAMPLE_REQUEST_TIMEOUT_SECONDS = 5.0
+SAMPLE_REQUEST_ATTEMPTS = 2
+
+
+def sample_request_json(url: str) -> tuple[Any | None, str]:
+    errors: list[str] = []
+    for attempt in range(1, SAMPLE_REQUEST_ATTEMPTS + 1):
+        try:
+            return request_json(url, timeout=SAMPLE_REQUEST_TIMEOUT_SECONDS), ""
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            errors.append(f"attempt{attempt}:{type(exc).__name__}:{exc}")
+    return None, " | ".join(errors)
+
+
 def collect_cluster_sample(
     *,
     cluster: Any,
@@ -635,32 +651,65 @@ def collect_cluster_sample(
     elapsed_seconds: float,
     run_ids: set[str],
 ) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
     sampled = datetime.now(timezone.utc).isoformat()
-    for node in cluster.nodes:
+
+    def sample_node(node: Any) -> dict[str, Any]:
         api = base_url(node, cluster.api_port)
-        health = request_json(f"{api}/health", timeout=10.0)
-        telemetry = request_json(f"{api}/telemetry/tasks", timeout=10.0)
-        task_records = [item for item in telemetry if str(item.get("task_id")) in run_ids and str(item.get("node_id")) == node.id]
-        rows.append(
-            {
-                "policy": policy,
-                "sample_index": sample_index,
-                "sampled_at_utc": sampled,
-                "elapsed_seconds": elapsed_seconds,
-                "node_id": node.id,
-                "owned_task_count": health.get("owned_task_count"),
-                "reserved_cpu_cores": health.get("reserved_cpu_cores"),
-                "reserved_memory_mb": health.get("reserved_memory_mb"),
-                "resource_busy_fraction": health.get("resource_busy_fraction"),
-                "available_cpu_cores": health.get("available_cpu_cores"),
-                "task_telemetry_count": len(task_records),
-                "task_cpu_percent_sum": sum(float(item.get("cpu_utilization_percent") or 0.0) for item in task_records),
-                "task_rss_mb_sum": sum(float(item.get("memory_rss_mb") or 0.0) for item in task_records),
-                "capacity_respected": float(health.get("resource_busy_fraction") or 0.0) <= 1.0 + 1e-9,
-            }
+        health, health_error = sample_request_json(f"{api}/health")
+        telemetry, telemetry_error = sample_request_json(f"{api}/telemetry/tasks")
+        sample_complete = isinstance(health, dict) and isinstance(telemetry, list)
+        task_records = (
+            [
+                item
+                for item in telemetry
+                if str(item.get("task_id")) in run_ids
+                and str(item.get("node_id")) == node.id
+            ]
+            if isinstance(telemetry, list)
+            else []
         )
-    return rows
+        busy_fraction = health.get("resource_busy_fraction") if isinstance(health, dict) else None
+        error_parts = []
+        if health_error:
+            error_parts.append(f"health={health_error}")
+        if telemetry_error:
+            error_parts.append(f"telemetry={telemetry_error}")
+        return {
+            "policy": policy,
+            "sample_index": sample_index,
+            "sampled_at_utc": sampled,
+            "elapsed_seconds": elapsed_seconds,
+            "node_id": node.id,
+            "sample_complete": sample_complete,
+            "sample_error": "; ".join(error_parts),
+            "owned_task_count": health.get("owned_task_count") if isinstance(health, dict) else None,
+            "reserved_cpu_cores": health.get("reserved_cpu_cores") if isinstance(health, dict) else None,
+            "reserved_memory_mb": health.get("reserved_memory_mb") if isinstance(health, dict) else None,
+            "resource_busy_fraction": busy_fraction,
+            "available_cpu_cores": health.get("available_cpu_cores") if isinstance(health, dict) else None,
+            "task_telemetry_count": len(task_records),
+            "task_cpu_percent_sum": sum(float(item.get("cpu_utilization_percent") or 0.0) for item in task_records),
+            "task_rss_mb_sum": sum(float(item.get("memory_rss_mb") or 0.0) for item in task_records),
+            "capacity_respected": (
+                float(busy_fraction or 0.0) <= 1.0 + 1e-9
+                if sample_complete
+                else None
+            ),
+        }
+
+    rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max(1, len(cluster.nodes))) as pool:
+        future_by_node = {pool.submit(sample_node, node): node for node in cluster.nodes}
+        for future in as_completed(future_by_node):
+            node = future_by_node[future]
+            row = future.result()
+            rows.append(row)
+            if not row["sample_complete"]:
+                print(
+                    f"[sample-warning] {policy} sample={sample_index} node={node.id} "
+                    f"{row['sample_error']}"
+                )
+    return sorted(rows, key=lambda row: str(row["node_id"]))
 
 
 def wait_ownership(cluster: Any, run_ids: list[str], timeout: float) -> tuple[bool, list[dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -1088,19 +1137,44 @@ def run_trial(
         )
         successful_migrations = [row for row in migrations if row["status"] == "completed"]
         failed_migrations = [row for row in migrations if row["status"] == "failed"]
-        capacity_violations = [row for row in samples if not bool(row["capacity_respected"])]
+        complete_samples = [row for row in samples if bool(row.get("sample_complete"))]
+        capacity_violations = [row for row in complete_samples if not bool(row["capacity_respected"])]
+        sample_coverage_fraction = len(complete_samples) / len(samples) if samples else 0.0
+        node_sample_counts = Counter(str(row["node_id"]) for row in samples)
+        node_complete_counts = Counter(str(row["node_id"]) for row in complete_samples)
+        node_coverage = {
+            node.id: (
+                node_complete_counts[node.id] / node_sample_counts[node.id]
+                if node_sample_counts[node.id]
+                else 0.0
+            )
+            for node in cluster.nodes
+        }
+        min_node_sample_coverage_fraction = min(node_coverage.values()) if node_coverage else 0.0
+        if sample_coverage_fraction + 1e-12 < MIN_SAMPLE_COVERAGE_FRACTION:
+            raise RuntimeError(
+                f"resource telemetry coverage too low: {sample_coverage_fraction:.3f} "
+                f"< {MIN_SAMPLE_COVERAGE_FRACTION:.3f}"
+            )
+        if min_node_sample_coverage_fraction + 1e-12 < MIN_NODE_SAMPLE_COVERAGE_FRACTION:
+            raise RuntimeError(
+                f"per-node resource telemetry coverage too low: "
+                f"{min_node_sample_coverage_fraction:.3f} "
+                f"< {MIN_NODE_SAMPLE_COVERAGE_FRACTION:.3f}; {node_coverage}"
+            )
 
         total_carbon = sum(float(row.get("measurement_carbon_grams") or 0.0) for row in final_rows)
         total_cost = sum(float(row.get("measurement_cost_usd") or 0.0) for row in final_rows)
         total_runtime = sum(float(row.get("measurement_runtime_seconds") or 0.0) for row in final_rows)
         completed_count = sum(str(row.get("status")) == "completed" for row in final_rows)
         avg_busy = (
-            sum(float(row.get("resource_busy_fraction") or 0.0) for row in samples) / len(samples)
-            if samples else 0.0
+            sum(float(row.get("resource_busy_fraction") or 0.0) for row in complete_samples) / len(complete_samples)
+            if complete_samples else 0.0
         )
+        complete_round_equivalents = len(complete_samples) / len(cluster.nodes) if cluster.nodes else 0.0
         avg_cpu_percent = (
-            sum(float(row.get("task_cpu_percent_sum") or 0.0) for row in samples) / (len(samples) / len(cluster.nodes))
-            if samples else 0.0
+            sum(float(row.get("task_cpu_percent_sum") or 0.0) for row in complete_samples) / complete_round_equivalents
+            if complete_round_equivalents else 0.0
         )
 
         trial = {
@@ -1130,6 +1204,11 @@ def run_trial(
             "mean_observed_cluster_task_cpu_percent": avg_cpu_percent,
             "capacity_violation_sample_count": len(capacity_violations),
             "sample_round_count": int(len(samples) / len(cluster.nodes)) if cluster.nodes else 0,
+            "complete_sample_count": len(complete_samples),
+            "total_sample_count": len(samples),
+            "sample_coverage_fraction": sample_coverage_fraction,
+            "min_node_sample_coverage_fraction": min_node_sample_coverage_fraction,
+            "sample_error_count": len(samples) - len(complete_samples),
             "cleanup_ok_count": 0,
         }
 

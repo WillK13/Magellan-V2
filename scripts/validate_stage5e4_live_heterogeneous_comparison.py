@@ -14,6 +14,8 @@ from magellan.experiments.stage5e4 import (
     EXPECTED_SOURCE_SCENARIO_ID,
     EXPECTED_TASK_COUNT,
     MAGELLAN_POLICY,
+    MIN_NODE_SAMPLE_COVERAGE_FRACTION,
+    MIN_SAMPLE_COVERAGE_FRACTION,
     POLICIES,
     STATIC_POLICY,
     layout_fingerprint,
@@ -154,8 +156,32 @@ def main() -> int:
             errors.append(f"{policy} pre-live witness is not 9/9")
         if not samples:
             errors.append(f"{policy} has no resource samples")
-        if any(not truthy(row.get("capacity_respected")) for row in samples):
+        complete_samples = [row for row in samples if truthy(row.get("sample_complete"))]
+        if any(not truthy(row.get("capacity_respected")) for row in complete_samples):
             errors.append(f"{policy} contains a capacity violation sample")
+        coverage = len(complete_samples) / len(samples) if samples else 0.0
+        node_totals: dict[str, int] = {}
+        node_complete: dict[str, int] = {}
+        for row in samples:
+            node_id = str(row.get("node_id") or "")
+            node_totals[node_id] = node_totals.get(node_id, 0) + 1
+            if truthy(row.get("sample_complete")):
+                node_complete[node_id] = node_complete.get(node_id, 0) + 1
+        node_coverages = [
+            node_complete.get(node_id, 0) / total
+            for node_id, total in node_totals.items()
+            if total
+        ]
+        min_node_coverage = min(node_coverages) if node_coverages else 0.0
+        if coverage + 1e-12 < MIN_SAMPLE_COVERAGE_FRACTION:
+            errors.append(f"{policy} resource-sample coverage too low: {coverage:.3f}")
+        if min_node_coverage + 1e-12 < MIN_NODE_SAMPLE_COVERAGE_FRACTION:
+            errors.append(f"{policy} per-node resource-sample coverage too low: {min_node_coverage:.3f}")
+        trial_summary = by_policy[policy]
+        if abs(float(trial_summary.get("sample_coverage_fraction") or 0.0) - coverage) > 1e-9:
+            errors.append(f"{policy} sample-coverage summary mismatch")
+        if abs(float(trial_summary.get("min_node_sample_coverage_fraction") or 0.0) - min_node_coverage) > 1e-9:
+            errors.append(f"{policy} min-node sample-coverage summary mismatch")
         if len(cleanup) != EXPECTED_TASK_COUNT or sum(truthy(row.get("cleanup_ok")) for row in cleanup) != EXPECTED_TASK_COUNT:
             errors.append(f"{policy} cleanup is not 9/9")
         if len(final_tasks) != EXPECTED_TASK_COUNT:

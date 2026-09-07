@@ -59,6 +59,11 @@ def _trial(policy: str) -> dict:
         "mean_observed_cluster_task_cpu_percent": 700.0,
         "capacity_violation_sample_count": 0,
         "sample_round_count": 17,
+        "complete_sample_count": 118,
+        "total_sample_count": 119,
+        "sample_coverage_fraction": 118 / 119,
+        "min_node_sample_coverage_fraction": 16 / 17,
+        "sample_error_count": 1,
         "cleanup_ok_count": 9,
     }
 
@@ -161,3 +166,23 @@ def test_stage5e4_policy_differs_from_production_only_by_trace_anchor() -> None:
     assert experiment["clock"]["trace_start_utc"] == "2024-01-05T00:00:00Z"
     production["clock"]["trace_start_utc"] = experiment["clock"]["trace_start_utc"]
     assert production == experiment
+
+
+def test_stage5e4_rejects_low_resource_sample_coverage() -> None:
+    static = _trial(STATIC_POLICY)
+    magellan = _trial(MAGELLAN_POLICY)
+    magellan["sample_coverage_fraction"] = 0.89
+    assert not stage5e4_passes(
+        trial_summaries=[static, magellan],
+        expected_layout_fingerprint=layout_fingerprint(_layout()),
+    )
+
+
+def test_stage5e4_rejects_low_per_node_resource_sample_coverage() -> None:
+    static = _trial(STATIC_POLICY)
+    magellan = _trial(MAGELLAN_POLICY)
+    magellan["min_node_sample_coverage_fraction"] = 0.74
+    assert not stage5e4_passes(
+        trial_summaries=[static, magellan],
+        expected_layout_fingerprint=layout_fingerprint(_layout()),
+    )

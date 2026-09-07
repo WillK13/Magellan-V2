@@ -58,12 +58,19 @@ submitted immediately after that 9/9 witness (required within two seconds), whic
 proves the exact Dendro jobs were real physical background load at the scheduling
 epoch. They may complete normally later in the fixed trial window.
 
-During the fixed trial window, the harness samples all seven daemons for:
+During the fixed trial window, the harness samples all seven daemons concurrently for:
 
 - ResourceLedger CPU/RAM reservations and remaining capacity;
 - live task CPU/RSS telemetry;
 - physical owner count;
 - capacity violations.
+
+Sampling is observational and must not control experiment liveness. Each endpoint gets
+a short bounded retry; if a daemon is temporarily slow while checkpointing or activating
+a migration, the row is retained as an explicit incomplete sample rather than aborting
+the policy trial. PASS requires at least 90% complete samples cluster-wide and at least
+75% complete samples on every node. Capacity claims are evaluated only on complete
+samples, and the bundle records the coverage/error counts.
 
 At the end of each window it freezes authoritative task-accounting deltas
 from the pre-window baseline, final ownership, scheduler decisions, bids, migrations,
@@ -81,7 +88,8 @@ The experiment passes when:
   seconds of the 9/9 physical witness, then produces exactly six scheduler
   decisions, at least one bid, and at least one successful real migration;
 - no migration fails;
-- no sampled node exceeds configured resource capacity;
+- no complete sampled node exceeds configured resource capacity, with at least 90%
+  cluster-wide and 75% per-node telemetry coverage;
 - ownership converges at the end of each trial;
 - all nine tasks are completed/stopped cleanly per trial;
 - both trials accrue positive lifecycle carbon and cost over the fixed window.

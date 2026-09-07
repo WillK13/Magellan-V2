@@ -25,6 +25,8 @@ EXPECTED_CLASS_COUNTS = {
 EXPECTED_TASK_COUNT = 9
 DECISION_CLASSES = {BENCHMARK_CLASS_ID, LLM_CLASS_ID}
 EXPECTED_DECISION_TASK_COUNT = 6
+MIN_SAMPLE_COVERAGE_FRACTION = 0.90
+MIN_NODE_SAMPLE_COVERAGE_FRACTION = 0.75
 
 
 def _truthy(value: Any) -> bool:
@@ -87,6 +89,13 @@ def trial_passes(
     if int(trial.get("cleanup_ok_count") or 0) != EXPECTED_TASK_COUNT:
         return False
     if int(trial.get("capacity_violation_sample_count") or 0) != 0:
+        return False
+    if float(trial.get("sample_coverage_fraction") or 0.0) + 1e-12 < MIN_SAMPLE_COVERAGE_FRACTION:
+        return False
+    if (
+        float(trial.get("min_node_sample_coverage_fraction") or 0.0) + 1e-12
+        < MIN_NODE_SAMPLE_COVERAGE_FRACTION
+    ):
         return False
     if int(trial.get("failed_migration_count") or 0) != 0:
         return False
