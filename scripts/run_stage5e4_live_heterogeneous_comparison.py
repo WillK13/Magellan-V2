@@ -38,6 +38,7 @@ from magellan.experiments.stage5e2 import (
 from magellan.experiments.stage5e4 import (
     DECISION_CLASSES,
     EXPECTED_CLASS_COUNTS,
+    EXPECTED_DECISION_SOURCE_COUNT,
     EXPECTED_LOAD_ID,
     EXPECTED_SEASON,
     EXPECTED_SOURCE_SCENARIO_ID,
@@ -47,6 +48,7 @@ from magellan.experiments.stage5e4 import (
     MIN_SAMPLE_COVERAGE_FRACTION,
     POLICIES,
     STATIC_POLICY,
+    evaluation_source_groups,
     layout_fingerprint,
     read_stage4d3_u75_layout,
     stage5e4_passes,
@@ -838,6 +840,80 @@ def collect_trial_events(
     return decisions, bids, migrations
 
 
+def run_source_evaluation_epoch(
+    *,
+    source_rows: list[dict[str, Any]],
+    anchor: str,
+    request_timeout_seconds: float,
+    witness_completed_monotonic: float,
+) -> list[dict[str, Any]]:
+    """Evaluate one source daemon's frozen cohort in production epoch order.
+
+    Production ``SchedulerService.run_epoch()`` snapshots that daemon's running
+    task IDs and awaits each evaluation sequentially. Different daemons run their
+    own epochs independently, so the caller executes one of these loops per
+    source daemon concurrently.
+    """
+    results: list[dict[str, Any]] = []
+    ordered_rows = sorted(source_rows, key=lambda row: str(row.get("task_id") or ""))
+
+    for source_sequence_index, row in enumerate(ordered_rows):
+        request_started = time.monotonic()
+        query = urlencode({"trace_time_utc": anchor})
+        try:
+            value = request_json(
+                f"{row['api']}/tasks/{row['task_id']}/evaluate?{query}",
+                method="POST",
+                timeout=request_timeout_seconds,
+            )
+            state = value.get("state", {}) if isinstance(value, dict) else {}
+            results.append(
+                {
+                    "policy": MAGELLAN_POLICY,
+                    "task_id": row["task_id"],
+                    "class_id": row["class_id"],
+                    "initial_node_id": row["initial_node_id"],
+                    "source_sequence_index": source_sequence_index,
+                    "request_started_seconds_after_witness": (
+                        request_started - witness_completed_monotonic
+                    ),
+                    "request_completed_seconds_after_witness": (
+                        time.monotonic() - witness_completed_monotonic
+                    ),
+                    "trigger_ok": True,
+                    "trigger_error": "",
+                    "returned_owner_node_id": state.get("owner_node_id") or "",
+                    "returned_status": state.get("status") or "",
+                }
+            )
+        except Exception as exc:
+            # Match run_epoch's per-task failure isolation: one failed evaluation
+            # must not prevent later tasks on the same source daemon from being
+            # evaluated. The trial still fails after the fixed window if any
+            # trigger failed.
+            results.append(
+                {
+                    "policy": MAGELLAN_POLICY,
+                    "task_id": row["task_id"],
+                    "class_id": row["class_id"],
+                    "initial_node_id": row["initial_node_id"],
+                    "source_sequence_index": source_sequence_index,
+                    "request_started_seconds_after_witness": (
+                        request_started - witness_completed_monotonic
+                    ),
+                    "request_completed_seconds_after_witness": (
+                        time.monotonic() - witness_completed_monotonic
+                    ),
+                    "trigger_ok": False,
+                    "trigger_error": f"{type(exc).__name__}: {exc}",
+                    "returned_owner_node_id": "",
+                    "returned_status": "",
+                }
+            )
+
+    return results
+
+
 def run_trial(
     *,
     policy: str,
@@ -984,28 +1060,37 @@ def run_trial(
         run_ids = {row["task_id"] for row in launched}
 
         evaluation_pool: ThreadPoolExecutor | None = None
-        evaluation_futures: dict[Future[Any], dict[str, Any]] = {}
+        evaluation_futures: dict[Future[list[dict[str, Any]]], str] = {}
         evaluation_results: list[dict[str, Any]] = []
         evaluation_trigger_delay_seconds = 0.0
+        evaluation_source_daemon_count = 0
         if policy == MAGELLAN_POLICY:
             cohort = [row for row in launched if row["class_id"] in DECISION_CLASSES]
+            source_groups = evaluation_source_groups(cohort)
+            evaluation_source_daemon_count = len(source_groups)
+            if evaluation_source_daemon_count != EXPECTED_DECISION_SOURCE_COUNT:
+                raise RuntimeError(
+                    "Stage 5E.4 decision cohort source geometry drifted: "
+                    f"{evaluation_source_daemon_count} != {EXPECTED_DECISION_SOURCE_COUNT}"
+                )
             print(
                 f"[evaluate] triggering {len(cohort)} benchmark/LLM production evaluations "
-                "immediately after the 9/9 physical witness"
+                f"across {evaluation_source_daemon_count} source daemons immediately after "
+                "the 9/9 physical witness; tasks are sequential within each source"
             )
-            evaluation_pool = ThreadPoolExecutor(max_workers=len(cohort))
-            for row in cohort:
-                query = urlencode({"trace_time_utc": anchor})
+            evaluation_pool = ThreadPoolExecutor(max_workers=evaluation_source_daemon_count)
+            for source_node_id, source_rows in source_groups:
                 future = evaluation_pool.submit(
-                    request_json,
-                    f"{row['api']}/tasks/{row['task_id']}/evaluate?{query}",
-                    method="POST",
-                    timeout=args.request_timeout_seconds,
+                    run_source_evaluation_epoch,
+                    source_rows=source_rows,
+                    anchor=anchor,
+                    request_timeout_seconds=args.request_timeout_seconds,
+                    witness_completed_monotonic=witness_completed_monotonic,
                 )
-                evaluation_futures[future] = row
+                evaluation_futures[future] = source_node_id
             evaluation_trigger_delay_seconds = time.monotonic() - witness_completed_monotonic
             print(
-                f"[evaluate] trigger_submission_delay_after_witness="
+                f"[evaluate] source_epoch_submission_delay_after_witness="
                 f"{evaluation_trigger_delay_seconds:.3f}s"
             )
 
@@ -1035,37 +1120,23 @@ def run_trial(
             unfinished = [future for future in evaluation_futures if not future.done()]
             if unfinished:
                 raise RuntimeError(
-                    f"{len(unfinished)} scheduler evaluations exceeded the fixed {args.trial_seconds:.0f}s trial window"
+                    f"{len(unfinished)} source scheduler epochs exceeded the fixed "
+                    f"{args.trial_seconds:.0f}s trial window"
                 )
-            for future, row in evaluation_futures.items():
+            for future, source_node_id in evaluation_futures.items():
                 try:
-                    value = future.result()
-                    state = value.get("state", {}) if isinstance(value, dict) else {}
-                    evaluation_results.append(
-                        {
-                            "policy": policy,
-                            "task_id": row["task_id"],
-                            "class_id": row["class_id"],
-                            "initial_node_id": row["initial_node_id"],
-                            "trigger_ok": True,
-                            "trigger_error": "",
-                            "returned_owner_node_id": state.get("owner_node_id") or "",
-                            "returned_status": state.get("status") or "",
-                        }
-                    )
+                    evaluation_results.extend(future.result())
                 except Exception as exc:
-                    evaluation_results.append(
-                        {
-                            "policy": policy,
-                            "task_id": row["task_id"],
-                            "class_id": row["class_id"],
-                            "initial_node_id": row["initial_node_id"],
-                            "trigger_ok": False,
-                            "trigger_error": f"{type(exc).__name__}: {exc}",
-                            "returned_owner_node_id": "",
-                            "returned_status": "",
-                        }
-                    )
+                    raise RuntimeError(
+                        f"source scheduler epoch failed on {source_node_id}: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+            evaluation_results.sort(
+                key=lambda row: (
+                    str(row["initial_node_id"]),
+                    int(row["source_sequence_index"]),
+                )
+            )
             if any(not row["trigger_ok"] for row in evaluation_results):
                 raise RuntimeError(f"scheduler evaluation failure: {evaluation_results}")
         if evaluation_pool is not None:
@@ -1187,6 +1258,7 @@ def run_trial(
             "trace_anchor_utc": anchor,
             "trace_date_utc": anchor[:10],
             "pre_live_witness_count": sum(bool(row["live"]) for row in witness),
+            "evaluation_source_daemon_count": evaluation_source_daemon_count,
             "evaluation_trigger_delay_seconds_after_witness": evaluation_trigger_delay_seconds,
             "scheduler_decision_count": len(decisions),
             "bid_count": len(bids),
@@ -1461,9 +1533,11 @@ def main() -> int:
             ),
             "policies": (
                 "static_initial_layout runs the real workload population without scheduler "
-                "evaluation. magellan_lowest_score triggers one synchronized production "
-                "scheduler epoch for the six benchmark/LLM tasks while the three exact Dendro "
-                "tasks remain real physical background load. Both trials use the same fixed "
+                "evaluation. magellan_lowest_score triggers one synchronized production-style "
+                "epoch across the four source daemons owning the six benchmark/LLM tasks: source "
+                "daemons execute concurrently while each daemon evaluates its task IDs sequentially, "
+                "matching SchedulerService.run_epoch(). The three exact Dendro tasks remain real "
+                "physical background load. Both trials use the same fixed "
                 "wall-clock measurement duration."
             ),
             "physical_evidence": (

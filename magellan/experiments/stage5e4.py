@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -25,6 +25,7 @@ EXPECTED_CLASS_COUNTS = {
 EXPECTED_TASK_COUNT = 9
 DECISION_CLASSES = {BENCHMARK_CLASS_ID, LLM_CLASS_ID}
 EXPECTED_DECISION_TASK_COUNT = 6
+EXPECTED_DECISION_SOURCE_COUNT = 4
 MIN_SAMPLE_COVERAGE_FRACTION = 0.90
 MIN_NODE_SAMPLE_COVERAGE_FRACTION = 0.75
 
@@ -70,6 +71,35 @@ def layout_fingerprint(rows: Iterable[dict[str, Any]]) -> tuple[tuple[str, str],
     return tuple(sorted((str(row.get("initial_node_id")), str(row.get("class_id"))) for row in rows))
 
 
+def evaluation_source_groups(
+    rows: Iterable[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Snapshot Stage 5E.4 decision tasks in production daemon epoch order.
+
+    ``SchedulerService.run_epoch()`` snapshots running tasks independently on
+    every daemon, then evaluates that daemon's task IDs sequentially. The
+    persistent registry exposes those IDs in sorted task-id order. Stage 5E.4
+    must preserve the same boundary while allowing different source daemons to
+    execute concurrently.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if str(row.get("class_id")) not in DECISION_CLASSES:
+            continue
+        source_node_id = str(row.get("initial_node_id") or "")
+        if not source_node_id:
+            raise ValueError("Stage 5E.4 evaluation row is missing initial_node_id")
+        grouped[source_node_id].append(row)
+
+    return [
+        (
+            source_node_id,
+            sorted(source_rows, key=lambda row: str(row.get("task_id") or "")),
+        )
+        for source_node_id, source_rows in sorted(grouped.items())
+    ]
+
+
 def trial_passes(
     trial: dict[str, Any],
     *,
@@ -112,11 +142,16 @@ def trial_passes(
     decisions = int(trial.get("scheduler_decision_count") or 0)
     bids = int(trial.get("bid_count") or 0)
     migrations = int(trial.get("successful_migration_count") or 0)
+    source_daemons = int(trial.get("evaluation_source_daemon_count") or 0)
     if policy == STATIC_POLICY:
         if decisions != 0 or bids != 0 or migrations != 0:
             return False
+        if source_daemons != 0:
+            return False
     else:
         if decisions != EXPECTED_DECISION_TASK_COUNT:
+            return False
+        if source_daemons != EXPECTED_DECISION_SOURCE_COUNT:
             return False
         if bids < 1:
             return False

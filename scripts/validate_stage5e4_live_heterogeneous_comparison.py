@@ -9,6 +9,7 @@ from pathlib import Path
 from magellan.experiments.bundle import validate_checksums
 from magellan.experiments.stage5e4 import (
     EXPECTED_CLASS_COUNTS,
+    EXPECTED_DECISION_SOURCE_COUNT,
     EXPECTED_LOAD_ID,
     EXPECTED_SEASON,
     EXPECTED_SOURCE_SCENARIO_ID,
@@ -137,6 +138,10 @@ def main() -> int:
         errors.append("static trial contains bids")
     if int(static.get("successful_migration_count") or 0) != 0:
         errors.append("static trial contains migrations")
+    if int(magellan.get("evaluation_source_daemon_count") or 0) != EXPECTED_DECISION_SOURCE_COUNT:
+        errors.append(
+            "Magellan trial does not contain the four frozen source-daemon epoch workers"
+        )
     if int(magellan.get("scheduler_decision_count") or 0) != 6:
         errors.append("Magellan trial does not contain six decision-cohort evaluations")
     if int(magellan.get("successful_migration_count") or 0) < 1:
@@ -144,7 +149,10 @@ def main() -> int:
     if int(magellan.get("failed_migration_count") or 0) != 0:
         errors.append("Magellan trial contains failed migrations")
     if float(magellan.get("evaluation_trigger_delay_seconds_after_witness") or 0.0) > 2.0:
-        errors.append("Magellan evaluation triggers were not issued promptly after the 9/9 physical witness")
+        errors.append(
+            "Magellan source-daemon epoch workers were not dispatched promptly after the "
+            "9/9 physical witness"
+        )
 
     for policy in POLICIES:
         trial_root = root / policy

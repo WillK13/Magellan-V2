@@ -29,8 +29,11 @@ Two sequential trials use the same task layout and fixed wall-clock measurement
 window:
 
 1. `static_initial_layout`: no scheduler evaluation is triggered.
-2. `magellan_lowest_score`: one synchronized production scheduler epoch is
-   triggered for the six benchmark/LLM tasks. The three exact Dendro workloads
+2. `magellan_lowest_score`: one synchronized production-style scheduler epoch is
+   triggered for the six benchmark/LLM tasks. The controlled harness matches
+   `SchedulerService.run_epoch()` ordering: the four source daemons execute
+   concurrently, while each daemon evaluates its locally owned task IDs
+   sequentially in registry task-id order. The three exact Dendro workloads
    remain real physical background load during the decision instant.
 
 The daemons are restarted before each trial so their trace clocks reset to the
@@ -56,7 +59,10 @@ validated in Stage 5E.2), so the witness itself cannot serially consume the shor
 Dendro run. For the Magellan policy, the six benchmark/LLM evaluation requests are
 submitted immediately after that 9/9 witness (required within two seconds), which
 proves the exact Dendro jobs were real physical background load at the scheduling
-epoch. They may complete normally later in the fixed trial window.
+epoch. The harness dispatches the four source-daemon evaluation loops within two
+seconds of the witness; second tasks on Boston and California begin only after the
+preceding local task evaluation completes, exactly as in production `run_epoch()`.
+The Dendro jobs may complete normally later in the fixed trial window.
 
 During the fixed trial window, the harness samples all seven daemons concurrently for:
 
@@ -84,9 +90,11 @@ The experiment passes when:
 - both trials use the exact same frozen nine-task layout and 3/3/3 class mix;
 - both obtain a 9/9 direct pre-trial live-process witness;
 - the static trial produces zero scheduler decisions, bids, or migrations;
-- the Magellan trial submits its six benchmark/LLM evaluations within two
-  seconds of the 9/9 physical witness, then produces exactly six scheduler
-  decisions, at least one bid, and at least one successful real migration;
+- the Magellan trial dispatches its four source-daemon evaluation loops within
+  two seconds of the 9/9 physical witness, executes the six benchmark/LLM
+  evaluations sequentially within each source daemon and concurrently across
+  source daemons, then produces exactly six scheduler decisions, at least one
+  bid, and at least one successful real migration;
 - no migration fails;
 - no complete sampled node exceeds configured resource capacity, with at least 90%
   cluster-wide and 75% per-node telemetry coverage;

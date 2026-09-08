@@ -3,12 +3,16 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import time
 
+import scripts.run_stage5e4_live_heterogeneous_comparison as stage5e4_runner
 from magellan.experiments.stage5e4 import (
     EXPECTED_CLASS_COUNTS,
+    EXPECTED_DECISION_SOURCE_COUNT,
     EXPECTED_SOURCE_SCENARIO_ID,
     MAGELLAN_POLICY,
     STATIC_POLICY,
+    evaluation_source_groups,
     layout_fingerprint,
     read_stage4d3_u75_layout,
     stage5e4_passes,
@@ -42,6 +46,7 @@ def _trial(policy: str) -> dict:
         "trace_anchor_utc": "2024-01-05T00:02:00+00:00",
         "trace_date_utc": "2024-01-05",
         "pre_live_witness_count": 9,
+        "evaluation_source_daemon_count": 0 if policy == STATIC_POLICY else EXPECTED_DECISION_SOURCE_COUNT,
         "evaluation_trigger_delay_seconds_after_witness": 0.0 if policy == STATIC_POLICY else 0.2,
         "scheduler_decision_count": 0 if policy == STATIC_POLICY else 6,
         "bid_count": 0 if policy == STATIC_POLICY else 4,
@@ -119,6 +124,74 @@ def test_magellan_trial_rejects_late_evaluation_after_physical_witness() -> None
     trial = _trial(MAGELLAN_POLICY)
     trial["evaluation_trigger_delay_seconds_after_witness"] = 2.5
     assert not trial_passes(trial, expected_layout_fingerprint=layout_fingerprint(_layout()))
+
+def test_magellan_trial_requires_four_source_daemon_epochs() -> None:
+    trial = _trial(MAGELLAN_POLICY)
+    trial["evaluation_source_daemon_count"] = 6
+    assert not trial_passes(trial, expected_layout_fingerprint=layout_fingerprint(_layout()))
+
+
+
+def test_stage5e4_groups_decision_tasks_by_source_in_production_order() -> None:
+    rows = [dict(row) for row in _layout()]
+    # Dendro is physical background load, not part of the controlled decision cohort.
+    groups = evaluation_source_groups(rows)
+
+    assert [source for source, _source_rows in groups] == [
+        "boston",
+        "california",
+        "france",
+        "nepal",
+    ]
+    assert len(groups) == EXPECTED_DECISION_SOURCE_COUNT
+    assert {
+        source: [str(row["task_id"]) for row in source_rows]
+        for source, source_rows in groups
+    } == {
+        "boston": ["b1", "b2"],
+        "california": ["b3", "l1"],
+        "france": ["l3"],
+        "nepal": ["l2"],
+    }
+
+
+def test_source_evaluation_epoch_is_sequential_and_isolates_task_failures(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_request_json(url: str, **_kwargs):
+        task_id = url.split("/tasks/", 1)[1].split("/evaluate", 1)[0]
+        calls.append(task_id)
+        if task_id == "run-a":
+            raise RuntimeError("synthetic first-task failure")
+        return {"state": {"owner_node_id": "boston", "status": "running"}}
+
+    monkeypatch.setattr(stage5e4_runner, "request_json", fake_request_json)
+    witness_finished = time.monotonic()
+    results = stage5e4_runner.run_source_evaluation_epoch(
+        source_rows=[
+            {
+                "task_id": "run-b",
+                "class_id": "benchmark-json-medium",
+                "initial_node_id": "boston",
+                "api": "http://boston:8040",
+            },
+            {
+                "task_id": "run-a",
+                "class_id": "benchmark-json-medium",
+                "initial_node_id": "boston",
+                "api": "http://boston:8040",
+            },
+        ],
+        anchor="2024-01-05T00:00:00+00:00",
+        request_timeout_seconds=1.0,
+        witness_completed_monotonic=witness_finished,
+    )
+
+    # PersistentTaskRegistry.all_states() sorts task IDs, and run_epoch awaits
+    # each task before starting the next one. The controlled helper does the same.
+    assert calls == ["run-a", "run-b"]
+    assert [row["source_sequence_index"] for row in results] == [0, 1]
+    assert [row["trigger_ok"] for row in results] == [False, True]
 
 def test_stage5e4_comparison_passes_without_requiring_carbon_win() -> None:
     static = _trial(STATIC_POLICY)
