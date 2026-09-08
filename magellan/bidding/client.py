@@ -34,36 +34,87 @@ class BidClient:
         timeout = httpx.Timeout(
             self._cluster.request_timeout_seconds
         )
+        # Leave enough room for the auction window plus transient request
+        # failures. The destination's BidStore is idempotent by bid_id, so
+        # retrying a POST whose response was lost is safe and lets the source
+        # recover an already-persisted/accepted bid instead of orphaning its
+        # reservation.
         total_wait_seconds = (
             self._cluster.bid_window_seconds
-            + self._cluster.request_timeout_seconds
+            + 3 * self._cluster.request_timeout_seconds
             + 3
         )
         deadline = time.monotonic() + total_wait_seconds
+        last_transport_error: Exception | None = None
+
+        def retryable_http_error(exc: httpx.HTTPError) -> bool:
+            if isinstance(exc, httpx.TransportError):
+                return True
+            if isinstance(exc, httpx.HTTPStatusError):
+                return exc.response.status_code >= 500
+            return False
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{base_url}/bids",
-                json=request.model_dump(mode="json"),
-            )
-            response.raise_for_status()
-            record = BidRecord.model_validate(response.json())
+            record: BidRecord | None = None
+
+            while record is None:
+                try:
+                    response = await client.post(
+                        f"{base_url}/bids",
+                        json=request.model_dump(mode="json"),
+                    )
+                    response.raise_for_status()
+                    record = BidRecord.model_validate(response.json())
+                except httpx.HTTPError as exc:
+                    if not retryable_http_error(exc):
+                        raise
+                    last_transport_error = exc
+                    print(
+                        f"[bid-submit-retry] bid={request.bid_id} "
+                        f"error={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            f"Timed out submitting bid {request.bid_id}; "
+                            f"last transport error: {type(exc).__name__}: {exc}"
+                        ) from exc
+                    await asyncio.sleep(0.25)
 
             while record.status == BidStatus.PENDING:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"Timed out waiting for bid "
-                        f"{request.bid_id}"
+                    detail = (
+                        ""
+                        if last_transport_error is None
+                        else (
+                            "; last transport error: "
+                            f"{type(last_transport_error).__name__}: "
+                            f"{last_transport_error}"
+                        )
+                    )
+                    raise RuntimeError(
+                        f"Timed out waiting for bid {request.bid_id}{detail}"
                     )
 
                 await asyncio.sleep(0.25)
-                response = await client.get(
-                    f"{base_url}/bids/{request.bid_id}"
-                )
-                response.raise_for_status()
-                record = BidRecord.model_validate(
-                    response.json()
-                )
+                try:
+                    response = await client.get(
+                        f"{base_url}/bids/{request.bid_id}"
+                    )
+                    response.raise_for_status()
+                    record = BidRecord.model_validate(
+                        response.json()
+                    )
+                except httpx.HTTPError as exc:
+                    if not retryable_http_error(exc):
+                        raise
+                    last_transport_error = exc
+                    print(
+                        f"[bid-poll-retry] bid={request.bid_id} "
+                        f"error={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    continue
 
         return record
 
