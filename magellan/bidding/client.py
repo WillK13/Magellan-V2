@@ -24,6 +24,40 @@ class BidClient:
             f"{self._cluster.api_port}"
         )
 
+    def _control_request_timeout_seconds(self) -> float:
+        """Return the bounded timeout for auction-critical HTTP requests.
+
+        General peer/telemetry requests use ``request_timeout_seconds``. Bids
+        are different: the destination daemon can be CPU-starved by the very
+        physical workload whose capacity it is arbitrating. Give the control
+        RPC enough room to survive several normal request-timeout intervals
+        plus one auction window without changing the global peer timeout.
+        """
+        return max(
+            self._cluster.request_timeout_seconds,
+            3 * self._cluster.bid_window_seconds
+            + self._cluster.request_timeout_seconds,
+        )
+
+    def _total_wait_seconds(self) -> float:
+        """Bound one bid from submission through an observable decision."""
+        return max(
+            self._control_request_timeout_seconds()
+            + self._cluster.bid_window_seconds
+            + self._cluster.request_timeout_seconds,
+            self._cluster.reservation_renew_interval_seconds
+            + self._cluster.bid_window_seconds
+            + self._cluster.request_timeout_seconds,
+        )
+
+    @staticmethod
+    def _retryable_http_error(exc: httpx.HTTPError) -> bool:
+        if isinstance(exc, httpx.TransportError):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code >= 500
+        return False
+
     async def submit_and_wait(
         self,
         request: BidRequest,
@@ -32,54 +66,105 @@ class BidClient:
             request.destination_node_id
         )
         timeout = httpx.Timeout(
-            self._cluster.request_timeout_seconds
+            self._control_request_timeout_seconds()
         )
-        # Leave enough room for the auction window plus transient request
-        # failures. The destination's BidStore is idempotent by bid_id, so
-        # retrying a POST whose response was lost is safe and lets the source
-        # recover an already-persisted/accepted bid instead of orphaning its
-        # reservation.
-        total_wait_seconds = (
-            self._cluster.bid_window_seconds
-            + 3 * self._cluster.request_timeout_seconds
-            + 3
-        )
-        deadline = time.monotonic() + total_wait_seconds
+        deadline = time.monotonic() + self._total_wait_seconds()
         last_transport_error: Exception | None = None
-
-        def retryable_http_error(exc: httpx.HTTPError) -> bool:
-            if isinstance(exc, httpx.TransportError):
-                return True
-            if isinstance(exc, httpx.HTTPStatusError):
-                return exc.response.status_code >= 500
-            return False
+        resubmitted_after_not_found = False
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             record: BidRecord | None = None
 
+            try:
+                response = await client.post(
+                    f"{base_url}/bids",
+                    json=request.model_dump(mode="json"),
+                )
+                response.raise_for_status()
+                record = BidRecord.model_validate(response.json())
+            except httpx.HTTPError as exc:
+                if not self._retryable_http_error(exc):
+                    raise
+                last_transport_error = exc
+                print(
+                    f"[bid-submit-recover] bid={request.bid_id} "
+                    f"error={type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+            # A timed-out POST may already have been persisted by the
+            # destination. Recover by reading the durable bid before sending
+            # another copy. Only a confirmed 404 permits one idempotent
+            # resubmission of the same bid_id.
             while record is None:
+                if time.monotonic() >= deadline:
+                    detail = (
+                        ""
+                        if last_transport_error is None
+                        else (
+                            "; last transport error: "
+                            f"{type(last_transport_error).__name__}: "
+                            f"{last_transport_error}"
+                        )
+                    )
+                    raise RuntimeError(
+                        f"Timed out recovering bid {request.bid_id}{detail}"
+                    )
+
+                await asyncio.sleep(0.25)
                 try:
-                    response = await client.post(
-                        f"{base_url}/bids",
-                        json=request.model_dump(mode="json"),
+                    response = await client.get(
+                        f"{base_url}/bids/{request.bid_id}"
                     )
                     response.raise_for_status()
                     record = BidRecord.model_validate(response.json())
+                    break
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        if not self._retryable_http_error(exc):
+                            raise
+                        last_transport_error = exc
+                        print(
+                            f"[bid-recover-retry] bid={request.bid_id} "
+                            f"error={type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                        continue
+
+                    if resubmitted_after_not_found:
+                        continue
+
+                    resubmitted_after_not_found = True
+                    print(
+                        f"[bid-resubmit-after-404] bid={request.bid_id}",
+                        flush=True,
+                    )
+                    try:
+                        response = await client.post(
+                            f"{base_url}/bids",
+                            json=request.model_dump(mode="json"),
+                        )
+                        response.raise_for_status()
+                        record = BidRecord.model_validate(response.json())
+                    except httpx.HTTPError as submit_exc:
+                        if not self._retryable_http_error(submit_exc):
+                            raise
+                        last_transport_error = submit_exc
+                        print(
+                            f"[bid-submit-recover] bid={request.bid_id} "
+                            f"error={type(submit_exc).__name__}: {submit_exc}",
+                            flush=True,
+                        )
+                    continue
                 except httpx.HTTPError as exc:
-                    if not retryable_http_error(exc):
+                    if not self._retryable_http_error(exc):
                         raise
                     last_transport_error = exc
                     print(
-                        f"[bid-submit-retry] bid={request.bid_id} "
+                        f"[bid-recover-retry] bid={request.bid_id} "
                         f"error={type(exc).__name__}: {exc}",
                         flush=True,
                     )
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError(
-                            f"Timed out submitting bid {request.bid_id}; "
-                            f"last transport error: {type(exc).__name__}: {exc}"
-                        ) from exc
-                    await asyncio.sleep(0.25)
 
             while record.status == BidStatus.PENDING:
                 if time.monotonic() >= deadline:
@@ -106,7 +191,7 @@ class BidClient:
                         response.json()
                     )
                 except httpx.HTTPError as exc:
-                    if not retryable_http_error(exc):
+                    if not self._retryable_http_error(exc):
                         raise
                     last_transport_error = exc
                     print(
