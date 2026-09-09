@@ -631,8 +631,8 @@ def trace_anchor(cluster: Any) -> str:
     return str(forecast["generated_at_utc"])
 
 
-SAMPLE_REQUEST_TIMEOUT_SECONDS = 5.0
-SAMPLE_REQUEST_ATTEMPTS = 2
+SAMPLE_REQUEST_TIMEOUT_SECONDS = 12.0
+SAMPLE_REQUEST_ATTEMPTS = 1
 
 
 def sample_request_json(url: str) -> tuple[Any | None, str]:
@@ -657,8 +657,18 @@ def collect_cluster_sample(
 
     def sample_node(node: Any) -> dict[str, Any]:
         api = base_url(node, cluster.api_port)
-        health, health_error = sample_request_json(f"{api}/health")
-        telemetry, telemetry_error = sample_request_json(f"{api}/telemetry/tasks")
+        # Health and task telemetry are independent reads of the same live daemon.
+        # Fetch them in parallel so a loaded 2-vCPU node gets one bounded 12-second
+        # opportunity to answer each request without serial 5-second retry storms.
+        # The 12-second bound stays below the 15-second sampling cadence.
+        with ThreadPoolExecutor(max_workers=2) as request_pool:
+            health_future = request_pool.submit(sample_request_json, f"{api}/health")
+            telemetry_future = request_pool.submit(
+                sample_request_json,
+                f"{api}/telemetry/tasks",
+            )
+            health, health_error = health_future.result()
+            telemetry, telemetry_error = telemetry_future.result()
         sample_complete = isinstance(health, dict) and isinstance(telemetry, list)
         task_records = (
             [

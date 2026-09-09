@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import threading
 import time
+from types import SimpleNamespace
 
 import scripts.run_stage5e4_live_heterogeneous_comparison as stage5e4_runner
 from magellan.experiments.stage5e4 import (
@@ -192,6 +194,63 @@ def test_source_evaluation_epoch_is_sequential_and_isolates_task_failures(monkey
     assert calls == ["run-a", "run-b"]
     assert [row["source_sequence_index"] for row in results] == [0, 1]
     assert [row["trigger_ok"] for row in results] == [False, True]
+
+
+def test_stage5e4_sample_requests_use_one_bounded_long_read(monkeypatch) -> None:
+    observed_timeouts: list[float] = []
+
+    def fake_request_json(_url: str, *, timeout: float, **_kwargs):
+        observed_timeouts.append(timeout)
+        return {"ok": True}
+
+    monkeypatch.setattr(stage5e4_runner, "request_json", fake_request_json)
+
+    value, error = stage5e4_runner.sample_request_json("http://node/health")
+
+    assert value == {"ok": True}
+    assert error == ""
+    assert observed_timeouts == [12.0]
+    assert stage5e4_runner.SAMPLE_REQUEST_TIMEOUT_SECONDS < 15.0
+
+
+def test_stage5e4_collects_health_and_task_telemetry_concurrently(monkeypatch) -> None:
+    health_started = threading.Event()
+    telemetry_started = threading.Event()
+
+    def fake_sample_request_json(url: str):
+        if url.endswith("/health"):
+            health_started.set()
+            assert telemetry_started.wait(timeout=0.5)
+            return ({"resource_busy_fraction": 0.5, "owned_task_count": 1}, "")
+        if url.endswith("/telemetry/tasks"):
+            telemetry_started.set()
+            assert health_started.wait(timeout=0.5)
+            return ([{
+                "task_id": "run-1",
+                "node_id": "boston",
+                "cpu_utilization_percent": 50.0,
+                "memory_rss_mb": 10.0,
+            }], "")
+        raise AssertionError(url)
+
+    monkeypatch.setattr(stage5e4_runner, "sample_request_json", fake_sample_request_json)
+    cluster = SimpleNamespace(
+        api_port=8040,
+        nodes=[SimpleNamespace(id="boston", internal_ip="10.0.0.1")],
+    )
+
+    rows = stage5e4_runner.collect_cluster_sample(
+        cluster=cluster,
+        policy=STATIC_POLICY,
+        sample_index=0,
+        elapsed_seconds=0.0,
+        run_ids={"run-1"},
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["sample_complete"] is True
+    assert rows[0]["task_telemetry_count"] == 1
+    assert rows[0]["capacity_respected"] is True
 
 def test_stage5e4_comparison_passes_without_requiring_carbon_win() -> None:
     static = _trial(STATIC_POLICY)
