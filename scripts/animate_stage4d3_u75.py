@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Render a calibrated Stage 4D.3 u75 migration replay.
+"""Render a calibrated Stage 4D.3 capacity-constrained migration replay.
 
 This is a visualization of recorded simulator output, not a live execution.
-The default summer scenario is the representative season identified by the
-Stage 4D.3 methodology and contains nine tasks and seven accepted migrations.
+The default is the representative summer u75 scenario; any canonical Stage
+4D.3 load level can be selected, including the maximally packed umax case.
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import hashlib
 import json
 import math
 import os
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Polygon  # noqa: E402
 
 POLICY = "magellan_capacity_lowest_score"
+UNLIMITED_POLICY = "magellan_unlimited_reference"
 EXPECTED_SITES = {
     "boston",
     "california",
@@ -76,6 +78,7 @@ class Task:
     task_id: str
     class_id: str
     initial_node_id: str
+    completed_at: datetime
 
 
 @dataclass(frozen=True)
@@ -103,26 +106,43 @@ class Frame:
     active_group: int | None = None
 
 
+@dataclass(frozen=True)
+class OccupancySnapshot:
+    at: datetime
+    used_cpu_cores: dict[str, float]
+
+
 @dataclass
 class Replay:
     bundle: Path
     scenario_id: str
     season: str
+    load_id: str
+    initial_cpu_fraction: float
+    capacity_final_site_count: int
+    unlimited_final_site_count: int
     arrival: datetime
     finished: datetime
     sites: dict[str, Site]
     tasks: tuple[Task, ...]
     groups: tuple[MigrationGroup, ...]
     stage_locations: tuple[dict[str, str], ...]
+    occupancy: tuple[OccupancySnapshot, ...]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Animate a checksum-verified Stage 4D.3 u75 calibrated replay."
+        description="Animate a checksum-verified Stage 4D.3 calibrated replay."
     )
     parser.add_argument("--bundle", required=True, help="Canonical Stage 4D.3 bundle directory")
     parser.add_argument("--cluster", default="config/cluster.gcp.json")
     parser.add_argument("--season", choices=("winter", "spring", "summer", "fall"), default="summer")
+    parser.add_argument(
+        "--load-id",
+        choices=("u25", "u50", "u75", "umax"),
+        default="u75",
+        help="Recorded measured-utilization load level (umax is the busiest, with 11 tasks)",
+    )
     parser.add_argument("--output", help="MP4 path (default: experiments/visualizations/...)")
     parser.add_argument(
         "--gif",
@@ -202,6 +222,25 @@ def load_sites(cluster_path: Path, occupancy_rows: list[dict[str, str]], scenari
     return sites
 
 
+def load_occupancy(
+    rows: list[dict[str, str]], scenario_id: str
+) -> tuple[OccupancySnapshot, ...]:
+    grouped: dict[datetime, dict[str, float]] = defaultdict(dict)
+    for row in rows:
+        if row["scenario_id"] == scenario_id and row["policy"] == POLICY:
+            grouped[parse_time(row["at_utc"])][row["node_id"]] = float(row["used_cpu_cores"])
+    snapshots = tuple(
+        OccupancySnapshot(at=at, used_cpu_cores=used)
+        for at, used in sorted(grouped.items())
+    )
+    if not snapshots:
+        raise ValueError(f"No occupancy timeline found for {scenario_id}/{POLICY}")
+    for snapshot in snapshots:
+        if set(snapshot.used_cpu_cores) != EXPECTED_SITES:
+            raise ValueError(f"Incomplete occupancy snapshot at {snapshot.at.isoformat()}")
+    return snapshots
+
+
 def accepted_auction_keys(rows: Iterable[dict[str, str]], scenario_id: str) -> set[tuple[str, ...]]:
     return {
         (
@@ -217,7 +256,7 @@ def accepted_auction_keys(rows: Iterable[dict[str, str]], scenario_id: str) -> s
     }
 
 
-def load_replay(bundle: Path, cluster_path: Path, season: str) -> Replay:
+def load_replay(bundle: Path, cluster_path: Path, season: str, load_id: str) -> Replay:
     verify_checksums(bundle)
     summary = json.loads((bundle / "summary.json").read_text(encoding="utf-8"))
     if summary.get("passed") is not True:
@@ -226,23 +265,27 @@ def load_replay(bundle: Path, cluster_path: Path, season: str) -> Replay:
         raise ValueError("Bundle directory name does not match summary comparison_id")
 
     load_rows = read_csv(bundle / "load_cases.csv")
-    matches = [row for row in load_rows if row["season"] == season and row["load_id"] == "u75"]
+    matches = [row for row in load_rows if row["season"] == season and row["load_id"] == load_id]
     if len(matches) != 1:
-        raise ValueError(f"Expected one {season} u75 load case, found {len(matches)}")
+        raise ValueError(f"Expected one {season} {load_id} load case, found {len(matches)}")
     load_case = matches[0]
     scenario_id = load_case["scenario_id"]
-    if int(load_case["task_count"]) != 9:
-        raise ValueError(f"{scenario_id} has {load_case['task_count']} tasks, expected 9")
+    expected_task_count = int(load_case["task_count"])
 
     layout_rows = [
         row for row in read_csv(bundle / "initial_layout.csv") if row["scenario_id"] == scenario_id
     ]
-    tasks = tuple(
-        Task(row["task_id"], row["class_id"], row["initial_node_id"])
-        for row in sorted(layout_rows, key=lambda item: item["task_id"])
-    )
-    if len(tasks) != 9 or {task.class_id for task in tasks} != set(CLASS_STYLE):
-        raise ValueError("u75 layout must contain nine tasks across the three canonical classes")
+    if len(layout_rows) != expected_task_count:
+        raise ValueError(
+            f"{scenario_id} layout has {len(layout_rows)} tasks, expected {expected_task_count}"
+        )
+    expected_class_counts = {
+        "benchmark-json-medium": int(load_case["benchmark_task_count"]),
+        "dendro-r9-t1p0": int(load_case["dendro_task_count"]),
+        "llm-distilgpt2": int(load_case["llm_task_count"]),
+    }
+    if Counter(row["class_id"] for row in layout_rows) != expected_class_counts:
+        raise ValueError(f"{scenario_id} workload-class counts do not match load_cases.csv")
 
     outcome_rows = [
         row
@@ -254,6 +297,34 @@ def load_replay(bundle: Path, cluster_path: Path, season: str) -> Replay:
     outcome = outcome_rows[0]
     arrival = parse_time(outcome["arrival_utc"])
     finished = arrival + timedelta(seconds=float(outcome["makespan_seconds"]))
+
+    all_task_outcome_rows = read_csv(bundle / "task_outcomes.csv")
+    task_outcome_rows = [
+        row
+        for row in all_task_outcome_rows
+        if row["scenario_id"] == scenario_id and row["policy"] == POLICY
+    ]
+    outcomes_by_task = {row["task_id"]: row for row in task_outcome_rows}
+    layout_task_ids = {row["task_id"] for row in layout_rows}
+    if set(outcomes_by_task) != layout_task_ids:
+        raise ValueError(f"Task outcome coverage mismatch for {scenario_id}/{POLICY}")
+    unlimited_outcomes = [
+        row
+        for row in all_task_outcome_rows
+        if row["scenario_id"] == scenario_id and row["policy"] == UNLIMITED_POLICY
+    ]
+    if {row["task_id"] for row in unlimited_outcomes} != layout_task_ids:
+        raise ValueError(f"Task outcome coverage mismatch for {scenario_id}/{UNLIMITED_POLICY}")
+    tasks = tuple(
+        Task(
+            task_id=row["task_id"],
+            class_id=row["class_id"],
+            initial_node_id=row["initial_node_id"],
+            completed_at=arrival
+            + timedelta(seconds=float(outcomes_by_task[row["task_id"]]["completion_seconds"])),
+        )
+        for row in sorted(layout_rows, key=lambda item: item["task_id"])
+    )
 
     accepted = accepted_auction_keys(read_csv(bundle / "auction_events.csv"), scenario_id)
     migration_rows = [
@@ -312,18 +383,32 @@ def load_replay(bundle: Path, cluster_path: Path, season: str) -> Replay:
             locations[event.task_id] = event.destination
         stage_locations.append(dict(locations))
 
+    for task_id, final_node_id in locations.items():
+        recorded_final = outcomes_by_task[task_id]["final_node_id"]
+        if final_node_id != recorded_final:
+            raise ValueError(
+                f"Final location mismatch for {task_id}: replay={final_node_id}, "
+                f"task_outcomes={recorded_final}"
+            )
+
     occupancy_rows = read_csv(bundle / "occupancy_timeline.csv")
     sites = load_sites(cluster_path, occupancy_rows, scenario_id)
+    occupancy = load_occupancy(occupancy_rows, scenario_id)
     return Replay(
         bundle=bundle,
         scenario_id=scenario_id,
         season=season,
+        load_id=load_id,
+        initial_cpu_fraction=float(load_case["achieved_initial_cpu_fraction"]),
+        capacity_final_site_count=len({row["final_node_id"] for row in task_outcome_rows}),
+        unlimited_final_site_count=len({row["final_node_id"] for row in unlimited_outcomes}),
         arrival=arrival,
         finished=finished,
         sites=sites,
         tasks=tasks,
         groups=groups,
         stage_locations=tuple(stage_locations),
+        occupancy=occupancy,
     )
 
 
@@ -475,9 +560,12 @@ class ReplayAnimator:
         self.plot_kwargs = {"transform": self.transform} if self.transform is not None else {}
         self.stage_positions = tuple(offset_positions(replay, stage) for stage in replay.stage_locations)
         self.group_end_frame = self._group_end_frames()
+        self.occupancy_times = [snapshot.at for snapshot in replay.occupancy]
+        self.tasks_by_id = {task.task_id: task for task in replay.tasks}
         self.task_tokens = {task.task_id: f"T{index}" for index, task in enumerate(replay.tasks, 1)}
         self.task_artists = {}
         self.task_labels = {}
+        self.capacity_artists = {}
         self.arc_artists = []
         self._draw_static(show_capacity)
         self._create_dynamic()
@@ -491,7 +579,7 @@ class ReplayAnimator:
 
     def _draw_static(self, show_capacity: bool) -> None:
         self.axis.set_title(
-            "Magellan V2 · Stage 4D.3 u75 Calibrated Replay",
+            f"Magellan V2 · Stage 4D.3 {self.replay.load_id} Calibrated Replay",
             color="white",
             fontsize=18,
             fontweight="bold",
@@ -508,7 +596,30 @@ class ReplayAnimator:
             fontweight="bold",
             va="top",
         )
+        self.axis.text(
+            0.01,
+            0.948,
+            f"{len(self.replay.tasks)} RECORDED TASKS · "
+            f"{self.replay.initial_cpu_fraction:.1%} INITIAL MEASURED CPU · "
+            "SITE HALO = RECORDED CPU UTILIZATION",
+            transform=self.axis.transAxes,
+            color="#91a4b2",
+            fontsize=7.5,
+            va="top",
+        )
         for site in self.replay.sites.values():
+            if show_capacity:
+                self.capacity_artists[site.node_id] = self.axis.scatter(
+                    [site.longitude],
+                    [site.latitude],
+                    s=245,
+                    facecolor="none",
+                    edgecolor="#56ccf2",
+                    linewidth=1.2,
+                    alpha=0.45,
+                    zorder=3,
+                    **self.plot_kwargs,
+                )
             self.axis.scatter(
                 [site.longitude],
                 [site.latitude],
@@ -568,17 +679,30 @@ class ReplayAnimator:
             va="top",
         )
         y = 0.84
+        roster_step = min(0.073, 0.58 / max(len(self.replay.tasks) - 1, 1))
         for task in self.replay.tasks:
             label, color = CLASS_STYLE[task.class_id]
             suffix = task.task_id.removeprefix(common_prefix)
             self.panel.text(0.06, y, self.task_tokens[task.task_id], color=color, fontsize=9, fontweight="bold")
             self.panel.text(0.17, y, suffix, color="#e7eef3", fontsize=7.5)
             self.panel.text(0.17, y - 0.023, label, color="#91a4b2", fontsize=6.8)
-            y -= 0.073
-        self.panel.text(0.06, 0.14, "SIMULATED TIME (UTC)", color="#91a4b2", fontsize=8)
-        self.time_text = self.panel.text(0.06, 0.105, "", color="white", fontsize=11, fontweight="bold")
+            y -= roster_step
+        self.panel.text(
+            0.06,
+            0.215,
+            f"FINAL SITES  CAPACITY {self.replay.capacity_final_site_count} · "
+            f"UNLIMITED {self.replay.unlimited_final_site_count}",
+            color="#91a4b2",
+            fontsize=7.0,
+            fontweight="bold",
+        )
+        self.active_text = self.panel.text(
+            0.06, 0.18, "", color="#56ccf2", fontsize=8.5, fontweight="bold"
+        )
+        self.panel.text(0.06, 0.145, "SIMULATED TIME (UTC)", color="#91a4b2", fontsize=8)
+        self.time_text = self.panel.text(0.06, 0.115, "", color="white", fontsize=11, fontweight="bold")
         self.event_text = self.panel.text(
-            0.06, 0.075, "", color="#f2c94c", fontsize=7.5, va="top", wrap=True
+            0.06, 0.085, "", color="#f2c94c", fontsize=7.5, va="top", wrap=True
         )
         self.panel.text(
             0.06,
@@ -630,6 +754,24 @@ class ReplayAnimator:
         duration = max((event.finished - event.started).total_seconds(), 1e-9)
         return min(1.0, max(0.0, (at - event.started).total_seconds() / duration))
 
+    def _update_capacity(self, at: datetime) -> None:
+        if not self.capacity_artists:
+            return
+        snapshot_index = max(0, bisect.bisect_right(self.occupancy_times, at) - 1)
+        snapshot = self.replay.occupancy[snapshot_index]
+        for node_id, artist in self.capacity_artists.items():
+            site = self.replay.sites[node_id]
+            fraction = min(1.0, snapshot.used_cpu_cores[node_id] / site.cpu_cores)
+            if fraction >= 0.95:
+                color = "#eb5757"
+            elif fraction >= 0.75:
+                color = "#f2c94c"
+            else:
+                color = "#56ccf2"
+            artist.set_edgecolor(color)
+            artist.set_linewidth(1.0 + 2.2 * fraction)
+            artist.set_alpha(0.25 + 0.65 * fraction)
+
     def update(self, frame_index: int):
         frame = self.frames[frame_index]
         positions = dict(self.stage_positions[frame.stage])
@@ -656,9 +798,14 @@ class ReplayAnimator:
             ]
             event_message = "ACCEPTED MIGRATION\n" + "\n".join(descriptions)
 
+        active_count = 0
         for task_id, (x, y) in positions.items():
+            is_active = frame.at < self.tasks_by_id[task_id].completed_at
+            active_count += int(is_active)
             self.task_artists[task_id].set_offsets([[x, y]])
+            self.task_artists[task_id].set_alpha(1.0 if is_active else 0.0)
             self.task_labels[task_id].set_position((x, y))
+            self.task_labels[task_id].set_alpha(1.0 if is_active else 0.0)
 
         for group_index, group in enumerate(self.replay.groups):
             if group_index == frame.active_group:
@@ -675,11 +822,15 @@ class ReplayAnimator:
                 line.set_alpha(alpha)
 
         self.time_text.set_text(frame.at.strftime("%Y-%m-%d %H:%M:%S"))
+        self.active_text.set_text(f"ACTIVE TASKS  {active_count} / {len(self.replay.tasks)}")
         self.event_text.set_text(event_message)
+        self._update_capacity(frame.at)
         return [
             *self.task_artists.values(),
             *self.task_labels.values(),
+            *self.capacity_artists.values(),
             *(line for lines in self.arc_artists for line in lines),
+            self.active_text,
             self.time_text,
             self.event_text,
         ]
@@ -687,7 +838,7 @@ class ReplayAnimator:
 
 def print_plan(replay: Replay) -> None:
     migration_count = sum(len(group.migrations) for group in replay.groups)
-    print("Stage 4D.3 u75 calibrated replay validated")
+    print(f"Stage 4D.3 {replay.load_id} calibrated replay validated")
     print(f"bundle={replay.bundle}")
     print(f"scenario_id={replay.scenario_id}")
     print(f"policy={POLICY}")
@@ -733,13 +884,14 @@ def main() -> int:
     args = parse_args()
     bundle = Path(args.bundle).resolve()
     cluster = Path(args.cluster).resolve()
-    replay = load_replay(bundle, cluster, args.season)
+    replay = load_replay(bundle, cluster, args.season, args.load_id)
     print_plan(replay)
     if args.validate_only:
         return 0
 
     output = Path(args.output) if args.output else Path(
-        f"experiments/visualizations/stage4d3-u75-{args.season}-calibrated-replay.mp4"
+        f"experiments/visualizations/stage4d3-{args.load_id}-{args.season}-"
+        "calibrated-replay.mp4"
     )
     frames = build_frames(replay, args.frames_between_events, args.frames_per_migration)
     projection, _ = cartopy_projection(args.no_cartopy)

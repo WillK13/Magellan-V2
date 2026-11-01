@@ -1,8 +1,8 @@
-# Stage 4D.3 u75 calibrated replay animation
+# Stage 4D.3 calibrated replay animation
 
-`scripts/animate_stage4d3_u75.py` turns one recorded Stage 4D.3 `u75`
-scenario into a world-map animation. It is deliberately labeled **calibrated
-replay — not live execution**.
+`scripts/animate_stage4d3_u75.py` turns a recorded Stage 4D.3 capacity scenario
+into a world-map animation. It is deliberately labeled **calibrated replay —
+not live execution**.
 
 The default is the canonical summer scenario,
 `summer-20240820T1200Z-u75`, under
@@ -12,6 +12,16 @@ and seven accepted migrations. The script reads rather than hard-codes task
 IDs, placements, timestamps, and routes. It verifies `checksums.sha256` and
 requires every row in `migration_events.csv` to have a matching `accepted` row
 in `auction_events.csv`.
+
+Use `--load-id umax` for the busiest canonical case: the maximal measured
+packing of 11 tasks (4 benchmark, 3 Dendro-GR, and 4 LLM). The renderer also
+supports `u25`, `u50`, and `u75`. Completed tasks disappear at their recorded
+completion times so the map shows current rather than cumulative placement.
+Each site halo follows recorded CPU occupancy: cyan below 75%, yellow from
+75–95%, and red at 95% or greater. The side panel also reports the number of
+final sites under the capacity policy versus the bundle's unlimited reference;
+for summer `umax`, the recorded outcomes are spread over four sites instead of
+all 11 tasks selecting the same unlimited-reference site.
 
 ## Install
 
@@ -52,6 +62,17 @@ python scripts/animate_stage4d3_u75.py --bundle "$BUNDLE" --validate-only
 python scripts/animate_stage4d3_u75.py --bundle "$BUNDLE" --gif
 ```
 
+Render and preview the busiest capacity-constrained summer replay:
+
+```bash
+python scripts/animate_stage4d3_u75.py \
+  --bundle "$BUNDLE" \
+  --load-id umax \
+  --gif
+
+open experiments/visualizations/stage4d3-umax-summer-calibrated-replay.mp4
+```
+
 The default outputs are:
 
 ```text
@@ -75,6 +96,7 @@ Quiet periods are compressed to keep the visualization short. During each
 migration transition, the displayed UTC clock advances from the recorded
 `started_at_utc` to `finished_at_utc`; the route and task movement are not
 invented. Site labels remain fixed, colocated tasks receive deterministic
-offsets, and completed arcs fade after arrival. The small CPU annotation beside
-each site comes from `occupancy_timeline.csv` and is cross-checked against
-`config/cluster.gcp.json`; hide it with `--hide-capacity`.
+offsets, completed tasks disappear, and completed arcs fade after arrival. The
+CPU annotation and utilization halo at each site come from
+`occupancy_timeline.csv` and are cross-checked against
+`config/cluster.gcp.json`; hide them with `--hide-capacity`.
