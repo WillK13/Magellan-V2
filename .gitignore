@@ -28,3 +28,4 @@ experiments/comparisons/*
 !experiments/comparisons/.gitkeep
 experiments/measurements/*
 !experiments/measurements/.gitkeep
+experiments/visualizations/

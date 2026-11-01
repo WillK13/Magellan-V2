@@ -27,6 +27,13 @@ llm = [
     "transformers",
     "safetensors",
 ]
+visualization = [
+    "matplotlib>=3.7,<4",
+    "pillow>=10,<13",
+]
+cartography = [
+    "cartopy>=0.23,<1",
+]
 
 [tool.setuptools.packages.find]
 include = ["magellan*"]
