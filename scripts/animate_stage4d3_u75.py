@@ -579,7 +579,7 @@ class ReplayAnimator:
 
     def _draw_static(self, show_capacity: bool) -> None:
         self.axis.set_title(
-            f"Magellan V2 · Stage 4D.3 {self.replay.load_id} Calibrated Replay",
+            "Magellan Replay Visualization",
             color="white",
             fontsize=18,
             fontweight="bold",
@@ -589,7 +589,7 @@ class ReplayAnimator:
         self.subtitle = self.axis.text(
             0.01,
             0.985,
-            "RECORDED SIMULATION · NOT LIVE EXECUTION",
+            f"STAGE 4D.3 {self.replay.load_id} · CALIBRATED REPLAY · NOT LIVE EXECUTION",
             transform=self.axis.transAxes,
             color="#f2c94c",
             fontsize=9,
@@ -598,14 +598,22 @@ class ReplayAnimator:
         )
         self.axis.text(
             0.01,
-            0.948,
-            f"{len(self.replay.tasks)} RECORDED TASKS · "
-            f"{self.replay.initial_cpu_fraction:.1%} INITIAL MEASURED CPU · "
-            "SITE HALO = RECORDED CPU UTILIZATION",
+            0.938,
+            f"{len(self.replay.tasks)} TASKS · "
+            f"{self.replay.initial_cpu_fraction:.1%} INITIAL MEASURED CPU\n"
+            "HALO COLOR SHOWS RECORDED CPU UTILIZATION",
             transform=self.axis.transAxes,
-            color="#91a4b2",
-            fontsize=7.5,
+            color="#e7eef3",
+            fontsize=8.2,
+            fontweight="bold",
+            linespacing=1.4,
             va="top",
+            bbox={
+                "boxstyle": "round,pad=0.38",
+                "facecolor": "#08131f",
+                "edgecolor": "#29465b",
+                "alpha": 0.9,
+            },
         )
         for site in self.replay.sites.values():
             if show_capacity:
@@ -670,15 +678,7 @@ class ReplayAnimator:
 
         common_prefix = os.path.commonprefix([task.task_id for task in self.replay.tasks])
         self.panel.text(0.06, 0.95, "TASK ROSTER", color="white", fontsize=12, fontweight="bold")
-        self.panel.text(
-            0.06,
-            0.915,
-            "Full IDs use the prefix\n" + common_prefix,
-            color="#91a4b2",
-            fontsize=7.5,
-            va="top",
-        )
-        y = 0.84
+        y = 0.89
         roster_step = min(0.073, 0.58 / max(len(self.replay.tasks) - 1, 1))
         for task in self.replay.tasks:
             label, color = CLASS_STYLE[task.class_id]
@@ -890,8 +890,8 @@ def main() -> int:
         return 0
 
     output = Path(args.output) if args.output else Path(
-        f"experiments/visualizations/stage4d3-{args.load_id}-{args.season}-"
-        "calibrated-replay.mp4"
+        f"experiments/visualizations/magellan-replay-visualization-"
+        f"{args.load_id}-{args.season}.mp4"
     )
     frames = build_frames(replay, args.frames_between_events, args.frames_per_migration)
     projection, _ = cartopy_projection(args.no_cartopy)

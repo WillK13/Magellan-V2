@@ -70,14 +70,14 @@ python scripts/animate_stage4d3_u75.py \
   --load-id umax \
   --gif
 
-open experiments/visualizations/stage4d3-umax-summer-calibrated-replay.mp4
+open experiments/visualizations/magellan-replay-visualization-umax-summer.mp4
 ```
 
 The default outputs are:
 
 ```text
-experiments/visualizations/stage4d3-u75-summer-calibrated-replay.mp4
-experiments/visualizations/stage4d3-u75-summer-calibrated-replay.gif
+experiments/visualizations/magellan-replay-visualization-u75-summer.mp4
+experiments/visualizations/magellan-replay-visualization-u75-summer.gif
 ```
 
 The output directory is ignored by Git so rendered media does not enter a paper
